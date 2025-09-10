@@ -1,0 +1,4013 @@
+================================================================================
+FILE: .git/config  (size: 92 bytes)
+================================================================================
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+
+================================================================================
+FILE: .git/description  (size: 73 bytes)
+================================================================================
+Unnamed repository; edit this file 'description' to name the repository.
+
+================================================================================
+FILE: .git/HEAD  (size: 23 bytes)
+================================================================================
+ref: refs/heads/master
+
+================================================================================
+FILE: .git/hooks/applypatch-msg.sample  (size: 478 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+
+================================================================================
+FILE: .git/hooks/commit-msg.sample  (size: 896 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+
+================================================================================
+FILE: .git/hooks/fsmonitor-watchman.sample  (size: 4726 bytes)
+================================================================================
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+
+================================================================================
+FILE: .git/hooks/post-update.sample  (size: 189 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+
+================================================================================
+FILE: .git/hooks/pre-applypatch.sample  (size: 424 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+
+================================================================================
+FILE: .git/hooks/pre-commit.sample  (size: 1643 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+
+================================================================================
+FILE: .git/hooks/pre-merge-commit.sample  (size: 416 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+
+================================================================================
+FILE: .git/hooks/pre-push.sample  (size: 1374 bytes)
+================================================================================
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+
+================================================================================
+FILE: .git/hooks/pre-rebase.sample  (size: 4898 bytes)
+================================================================================
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+
+================================================================================
+FILE: .git/hooks/pre-receive.sample  (size: 544 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+================================================================================
+FILE: .git/hooks/prepare-commit-msg.sample  (size: 1492 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+
+================================================================================
+FILE: .git/hooks/push-to-checkout.sample  (size: 2783 bytes)
+================================================================================
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+
+================================================================================
+FILE: .git/hooks/sendemail-validate.sample  (size: 2308 bytes)
+================================================================================
+#!/bin/sh
+
+# An example hook script to validate a patch (and/or patch series) before
+# sending it via email.
+#
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to prevent the email(s) from being sent.
+#
+# To enable this hook, rename this file to "sendemail-validate".
+#
+# By default, it will only check that the patch(es) can be applied on top of
+# the default upstream branch without conflicts in a secondary worktree. After
+# validation (successful or not) of the last patch of a series, the worktree
+# will be deleted.
+#
+# The following config variables can be set to change the default remote and
+# remote ref that are used to apply the patches against:
+#
+#   sendemail.validateRemote (default: origin)
+#   sendemail.validateRemoteRef (default: HEAD)
+#
+# Replace the TODO placeholders with appropriate checks according to your
+# needs.
+
+validate_cover_letter () {
+	file="$1"
+	# TODO: Replace with appropriate checks (e.g. spell checking).
+	true
+}
+
+validate_patch () {
+	file="$1"
+	# Ensure that the patch applies without conflicts.
+	git am -3 "$file" || return
+	# TODO: Replace with appropriate checks for this patch
+	# (e.g. checkpatch.pl).
+	true
+}
+
+validate_series () {
+	# TODO: Replace with appropriate checks for the whole series
+	# (e.g. quick build, coding style checks, etc.).
+	true
+}
+
+# main -------------------------------------------------------------------------
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
+then
+	remote=$(git config --default origin --get sendemail.validateRemote) &&
+	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
+	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
+	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
+	git config --replace-all sendemail.validateWorktree "$worktree"
+else
+	worktree=$(git config --get sendemail.validateWorktree)
+fi || {
+	echo "sendemail-validate: error: failed to prepare worktree" >&2
+	exit 1
+}
+
+unset GIT_DIR GIT_WORK_TREE
+cd "$worktree" &&
+
+if grep -q "^diff --git " "$1"
+then
+	validate_patch "$1"
+else
+	validate_cover_letter "$1"
+fi &&
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
+then
+	git config --unset-all sendemail.validateWorktree &&
+	trap 'git worktree remove -ff "$worktree"' EXIT &&
+	validate_series
+fi
+
+================================================================================
+FILE: .git/hooks/update.sample  (size: 3650 bytes)
+================================================================================
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+
+================================================================================
+FILE: .git/info/exclude  (size: 240 bytes)
+================================================================================
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+================================================================================
+FILE: backend/.env  (size: 362 bytes)
+================================================================================
+PORT=4000
+MONGO_URI=mongodb://localhost:27017/health
+JWT_SECRET=change-me
+REDIS_URL=redis://localhost:6379
+CORS_ORIGIN=http://localhost:3000
+JWT_ACCESS_SECRET=9ffaa3928ee570b8eec4f762ad9099fce3410c38dff61115062eb0df40b9e914
+JWT_REFRESH_SECRET=5517c0bc2200f5f641c2ce46d310f8641955b4fc417da424507f8fe4e96338ed
+ACCESS_TTL=15m
+REFRESH_TTL_DAYS=30
+INVITE_TTL_HOURS=72
+
+================================================================================
+FILE: backend/.env.example  (size: 362 bytes)
+================================================================================
+PORT=4000
+MONGO_URI=mongodb://localhost:27017/health
+JWT_SECRET=change-me
+REDIS_URL=redis://localhost:6379
+CORS_ORIGIN=http://localhost:3000
+JWT_ACCESS_SECRET=9ffaa3928ee570b8eec4f762ad9099fce3410c38dff61115062eb0df40b9e914
+JWT_REFRESH_SECRET=5517c0bc2200f5f641c2ce46d310f8641955b4fc417da424507f8fe4e96338ed
+ACCESS_TTL=15m
+REFRESH_TTL_DAYS=30
+INVITE_TTL_HOURS=72
+
+================================================================================
+FILE: backend/package.json  (size: 765 bytes)
+================================================================================
+{
+  "name": "backend",
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "bcrypt": "^5.1.1",
+    "bullmq": "^5.58.5",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.7.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.18.1",
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/node": "^20.19.13",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+
+================================================================================
+FILE: backend/scripts/seed_first_doctor.js  (size: 3056 bytes)
+================================================================================
+#!/usr/bin/env node
+/**
+ * Seed first doctor user into MongoDB.
+ *
+ * Usage:
+ *   node seed_first_doctor.js --email=doctor@example.com --password="YourStrongPwd!" [--mongo="mongodb://localhost:27017/health"]
+ *
+ * Notes:
+ * - Requires: mongoose, bcrypt, dotenv (optional).
+ * - If the user already exists:
+ *     - by default, it will NOT overwrite.
+ *     - pass --force to reset password and set status=active.
+ */
+
+const path = require('path');
+try { require('dotenv').config({ path: path.resolve(process.cwd(), '.env') }); } catch {}
+
+const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
+
+// --- Parse args ---
+const args = process.argv.slice(2);
+function readFlag(name, fallback = undefined) {
+  const p = `--${name}=`;
+  const hit = args.find(a => a.startsWith(p));
+  if (hit) return hit.slice(p.length);
+  if (args.includes(`--${name}`)) return true; // boolean flag
+  return process.env[name.toUpperCase().replace(/-/g, '_')] ?? fallback;
+}
+const email = readFlag('email');
+const password = readFlag('password');
+const mongoUri = readFlag('mongo', process.env.MONGO_URI || 'mongodb://localhost:27017/health');
+const force = !!readFlag('force', false);
+
+if (!email || !password) {
+  console.error('Missing required flags. Example:\n  node seed_first_doctor.js --email=doctor@example.com --password="YourStrongPwd!" [--mongo="mongodb://localhost:27017/health"] [--force]');
+  process.exit(1);
+}
+
+// --- Minimal User model (matches backend fields) ---
+const userSchema = new mongoose.Schema({
+  email: { type: String, unique: true, required: true, index: true },
+  passwordHash: { type: String, required: true },
+  role: { type: String, enum: ['patient', 'doctor'], default: 'patient', index: true },
+  status: { type: String, enum: ['invited', 'active', 'locked'], default: 'invited', index: true },
+}, { timestamps: true });
+
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+
+(async () => {
+  try {
+    console.log(`[seed] Connecting to ${mongoUri} ...`);
+    await mongoose.connect(mongoUri);
+
+    const existing = await User.findOne({ email });
+    if (existing) {
+      if (!force) {
+        console.log(`[seed] User already exists: ${email}. Use --force to update password and set status=active.`);
+        process.exit(0);
+      }
+      const hash = await bcrypt.hash(password, 12);
+      existing.passwordHash = hash;
+      existing.role = 'doctor';
+      existing.status = 'active';
+      await existing.save();
+      console.log(`[seed] Updated existing doctor: ${email}`);
+      process.exit(0);
+    }
+
+    const hash = await bcrypt.hash(password, 12);
+    await User.create({
+      email,
+      passwordHash: hash,
+      role: 'doctor',
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    console.log(`[seed] Created first doctor: ${email}`);
+    process.exit(0);
+  } catch (err) {
+    console.error('[seed] ERROR:', err && err.message ? err.message : err);
+    process.exit(1);
+  } finally {
+    try { await mongoose.disconnect(); } catch {}
+  }
+})();
+
+================================================================================
+FILE: backend/src/collect_text_and_tree.py  (size: 9486 bytes)
+================================================================================
+#!/usr/bin/env python3
+"""
+Collect project sources:
+- For text files: write full contents (preserved exactly).
+- For non-text files: write only the file name (marked as UNSUPPORTED/BINARY).
+- Finally, append an ASCII tree of the entire project.
+
+Defaults: excludes heavy build/dependency folders (.next, node_modules) and lockfiles (package-lock.json);
+includes hidden files; deterministic order.
+You can pass --exclude to skip additional directories/files by name, and --followlinks to follow symlinks.
+"""
+
+from __future__ import annotations
+import argparse
+import os
+from pathlib import Path
+import sys
+import tokenize
+import mimetypes
+
+HEADER_LINE = "=" * 80
+
+# Common text-like extensions (still fallback to detection)
+TEXT_EXTS = {
+    # Code
+    ".java", ".kt", ".kts",
+    ".js", ".ts", ".jsx", ".tsx",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm", ".vue", ".svelte",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".m", ".mm",
+    ".go", ".rs", ".php", ".rb", ".swift", ".scala",
+    ".cs", ".sql", ".sh", ".bat", ".ps1",".py",
+    # Config / data / docs
+    ".json", ".yaml", ".yml", ".xml", ".ini", ".cfg", ".conf", ".properties",
+    ".toml", ".gradle", ".md", ".txt", ".env", ".csv", ".tsv",
+    ".gitignore", ".gitattributes", ".editorconfig", ".prettierrc", ".eslintrc",
+}
+
+# MIME types we treat as text even if extension is unknown
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_EXTRAS = {
+    "application/json", "application/xml", "application/javascript",
+    "application/x-sh", "application/x-shellscript",
+}
+
+# Default names to skip while walking/printing the tree (directories or files)
+DEFAULT_EXCLUDES = {".next", "node_modules", ".idea", ".venv", "package-lock.json"}
+
+# ---------- Helpers ----------
+
+def _has_bom(head: bytes) -> str | None:
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if head.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32-le"
+    if head.startswith(b"\x00\x00\xfe\xff"):
+        return "utf-32-be"
+    if head.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if head.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    return None
+
+def _looks_binary(head: bytes) -> bool:
+    if b"\x00" in head:
+        return True
+    # Consider control chars (excluding \t, \n, \r, \f) as "weird"
+    weird = sum(1 for b in head if (b < 32 and b not in (9, 10, 13, 12)))
+    # If > 30% are weird control bytes, likely binary
+    return (len(head) > 0) and (weird / len(head) > 0.30)
+
+def is_text_file(path: Path, sample_bytes: int = 4096) -> bool:
+    # 1) Obvious by extension
+    if path.suffix.lower() in TEXT_EXTS:
+        return True
+    # 2) BOM presence indicates text
+    try:
+        with path.open("rb") as f:
+            head = f.read(sample_bytes)
+    except Exception:
+        return False
+    if _has_bom(head):
+        return True
+    # 3) MIME hint
+    mt, _ = mimetypes.guess_type(path.as_posix())
+    if mt and (mt.startswith(TEXT_MIME_PREFIXES) or mt in TEXT_MIME_EXTRAS):
+        return True
+    # 4) Heuristic on bytes
+    return not _looks_binary(head)
+
+def read_text_preserve(path: Path) -> str:
+    """Read text preserving original characters as closely as possible."""
+    # Respect PEP 263 for Python files
+    if path.suffix.lower() == ".py":
+        with tokenize.open(path) as f:
+            return f.read()
+    # BOM-aware for common Unicode encodings
+    with path.open("rb") as fb:
+        head = fb.read(4)
+    enc = _has_bom(head)
+    if enc:
+        return path.read_text(encoding=enc)
+    # Try UTF-8, then Latin-1 (lossless mapping of bytes 0–255)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+def write_header(out, rel_path: Path, size_bytes: int | None, marker: str | None = None):
+    out.write(f"{HEADER_LINE}\n")
+    out.write(f"FILE: {rel_path.as_posix()}")
+    if size_bytes is not None:
+        out.write(f"  (size: {size_bytes} bytes)")
+    if marker:
+        out.write(f"  [{marker}]")
+    out.write("\n")
+    out.write(f"{HEADER_LINE}\n")
+
+def iter_all_files(root: Path, followlinks: bool, exclude_names: set[str]) -> list[Path]:
+    """
+    Walk the tree and return all file paths, skipping any directory whose *name*
+    is in exclude_names, and skipping any file whose *name* is in exclude_names.
+    """
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=followlinks):
+        # prune directories by name
+        if exclude_names:
+            dirnames[:] = [d for d in dirnames if d not in exclude_names]
+        # skip files by name (e.g., 'package-lock.json')
+        for fn in filenames:
+            if fn in exclude_names:
+                continue
+            files.append(Path(dirpath) / fn)
+    files.sort(key=lambda p: p.as_posix().lower())
+    return files
+
+def tree_lines(root: Path, exclude_names: set[str], followlinks: bool) -> list[str]:
+    """Produce an ASCII tree (dirs then files, sorted), excluding entries by name."""
+    lines: list[str] = [f"{root.name}/"]
+    def walk(d: Path, prefix: str):
+        try:
+            entries = sorted(
+                [e for e in d.iterdir() if e.name not in exclude_names],
+                key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except PermissionError:
+            return
+        for i, e in enumerate(entries):
+            last = (i == len(entries) - 1)
+            conn = "└── " if last else "├── "
+            if e.is_dir():
+                lines.append(f"{prefix}{conn}{e.name}/")
+                walk(e, prefix + ("    " if last else "│   "))
+            else:
+                lines.append(f"{prefix}{conn}{e.name}")
+    walk(root, "")
+    return lines
+
+# ---------- Main logic ----------
+
+def collect(root: Path, out_path: Path, followlinks: bool, exclude_names: set[str]) -> int:
+    root = root.resolve()
+    out_path = out_path.resolve()
+
+    if not root.exists() or not root.is_dir():
+        print(f"Error: root '{root}' is not a directory.", file=sys.stderr)
+        return 2
+
+    files = iter_all_files(root, followlinks, exclude_names)
+    if not files:
+        print("No files found.", file=sys.stderr)
+        return 1
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    text_count = 0
+    bin_count = 0
+
+    with out_path.open("w", encoding="utf-8", newline="\n") as out:
+        for f in files:
+            # Don't include the output file itself
+            try:
+                if f.resolve() == out_path:
+                    continue
+            except Exception:
+                pass
+
+            rel = f.relative_to(root)
+            try:
+                size_bytes = f.stat().st_size
+            except Exception:
+                size_bytes = None
+
+            try:
+                if is_text_file(f):
+                    content = read_text_preserve(f)
+                    write_header(out, rel, size_bytes)
+                    out.write(content)
+                    if not content.endswith("\n"):
+                        out.write("\n")
+                    out.write("\n")
+                    text_count += 1
+                else:
+                    write_header(out, rel, size_bytes, marker="UNSUPPORTED/NON-TEXT")
+                    out.write("(contents omitted)\n\n")
+                    bin_count += 1
+            except Exception as e:
+                write_header(out, rel, size_bytes, marker="READ_ERROR")
+                out.write(f"[ERROR] {e}\n\n")
+                bin_count += 1
+
+        # ---- Append project tree ----
+        out.write(f"{HEADER_LINE}\nPROJECT TREE\n{HEADER_LINE}\n")
+        for line in tree_lines(root, exclude_names, followlinks):
+            out.write(line + "\n")
+
+        # ---- Summary ----
+        out.write("\n")
+        out.write(f"{HEADER_LINE}\nSUMMARY\n{HEADER_LINE}\n")
+        out.write(f"Text files written : {text_count}\n")
+        out.write(f"Non-text/omitted   : {bin_count}\n")
+        out.write(f"Total files seen   : {len(files)}\n")
+
+    print(f"Done. Text={text_count}  Non-text={bin_count}  Wrote -> '{out_path}'.")
+    return 0
+
+def parse_excludes(argv_excludes: list[str]) -> set[str]:
+    """
+    Accept bare names (directories or files) to exclude while walking and when printing the tree.
+    Always include defaults (.next, node_modules, .idea, .venv, package-lock.json), while allowing users to add more.
+    """
+    return DEFAULT_EXCLUDES.union(set(argv_excludes or []))
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Write all text files, list non-text files, then append project tree."
+    )
+    ap.add_argument("root", type=Path, help="Root directory to scan")
+    ap.add_argument("output", type=Path, help="Output .txt file")
+    ap.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="Extra directory/file names to exclude in addition to defaults (space-separated)"
+    )
+    ap.add_argument("--followlinks", action="store_true", help="Follow symlinked directories")
+    args = ap.parse_args()
+
+    exclude_names = parse_excludes(args.exclude)
+    rc = collect(args.root, args.output, followlinks=args.followlinks, exclude_names=exclude_names)
+    sys.exit(rc)
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+FILE: backend/src/core/env.ts  (size: 608 bytes)
+================================================================================
+export const env = {
+    PORT: Number(process.env.PORT || 4000),
+    HOST: '0.0.0.0',
+    MONGO_URI: process.env.MONGO_URI || 'mongodb://localhost:27017/health',
+    CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    // JWT
+    JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'change-me-access',
+    JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'change-me-refresh',
+    ACCESS_TTL: process.env.ACCESS_TTL || '15m', // e.g., '15m'
+    REFRESH_TTL_DAYS: Number(process.env.REFRESH_TTL_DAYS || 30),
+    // Misc
+    INVITE_TTL_HOURS: Number(process.env.INVITE_TTL_HOURS || 72),
+};
+
+================================================================================
+FILE: backend/src/core/errors.ts  (size: 564 bytes)
+================================================================================
+import type { Request, Response, NextFunction } from 'express';
+import { ZodError } from 'zod';
+
+export function notFound(_req: Request, res: Response) {
+    res.status(404).json({ error: 'Not Found' });
+}
+
+export function errorHandler(err: any, _req: Request, res: Response, _next: NextFunction) {
+    if (err instanceof ZodError) {
+        return res.status(400).json({ error: 'ValidationError', details: err.issues });
+    }
+    const status = err?.status || 500;
+    res.status(status).json({ error: err?.message || 'Internal Server Error' });
+}
+
+================================================================================
+FILE: backend/src/core/jwt.ts  (size: 1787 bytes)
+================================================================================
+import { sign as jwtSign, verify as jwtVerify, type Secret, type SignOptions } from 'jsonwebtoken';
+import { env } from './env';
+
+export type Role = 'patient' | 'doctor';
+
+export type AccessClaims = { sub: string; role: Role; sid: string };
+export type RefreshClaims = { sid: string; sub: string };
+
+const ACCESS_SECRET = env.JWT_ACCESS_SECRET as unknown as Secret;
+const REFRESH_SECRET = env.JWT_REFRESH_SECRET as unknown as Secret;
+const EXPIRES_IN = env.ACCESS_TTL as unknown as SignOptions['expiresIn'];
+
+export const signAccess = (claims: AccessClaims): string =>
+    jwtSign(claims, ACCESS_SECRET, { expiresIn: EXPIRES_IN });
+
+export const verifyAccess = (token: string): AccessClaims =>
+    jwtVerify(token, ACCESS_SECRET) as AccessClaims;
+
+export const signRefresh = (claims: RefreshClaims, expiresAt: Date): string =>
+    jwtSign({ ...claims, exp: Math.floor(expiresAt.getTime() / 1000) }, REFRESH_SECRET);
+
+export const verifyRefresh = (token: string): (RefreshClaims & { exp: number }) =>
+    jwtVerify(token, REFRESH_SECRET) as any;
+
+export const authMiddleware = (req: any, res: any, next: any) => {
+    const hdr = req.headers.authorization;
+    if (!hdr) return res.status(401).json({ error: 'Missing Authorization' });
+    try {
+        const token = hdr.replace(/^Bearer\s+/i, '');
+        (req as any).user = verifyAccess(token);
+        next();
+    } catch {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+};
+
+export const requireRole = (...roles: Role[]) => (req: any, res: any, next: any) => {
+    const u = (req as any).user as AccessClaims | undefined;
+    if (!u) return res.status(401).json({ error: 'Unauthorized' });
+    if (!roles.includes(u.role)) return res.status(403).json({ error: 'Forbidden' });
+    return next();
+};
+
+================================================================================
+FILE: backend/src/features/auth/application/ActivateUser.ts  (size: 943 bytes)
+================================================================================
+import bcrypt from 'bcrypt';
+import { InviteModel } from '../infrastructure/mongo/InviteModel';
+import { MongoUserRepo } from '../infrastructure/mongo/MongoUserRepo';
+
+export async function activateUser(inviteToken: string, password: string) {
+    const invite = await InviteModel.findOne({ token: inviteToken });
+    if (!invite) throw new Error('Invalid token');
+    if (invite.usedAt) throw new Error('Token already used');
+    if (invite.expiresAt.getTime() < Date.now()) throw new Error('Token expired');
+
+    const repo = new MongoUserRepo();
+    const user = await repo.findById(String(invite.userId));
+    if (!user) throw new Error('User not found');
+    const passwordHash = await bcrypt.hash(password, 10);
+    await repo.updatePassword(user.id, passwordHash);
+    await repo.updateStatus(user.id, 'active');
+    invite.usedAt = new Date();
+    await invite.save();
+    return { id: user.id, email: user.email, role: user.role };
+}
+
+================================================================================
+FILE: backend/src/features/auth/application/InvitePatient.ts  (size: 1061 bytes)
+================================================================================
+import { InviteModel } from '../infrastructure/mongo/InviteModel';
+import { UserRepo } from '../domain/repositories/UserRepo';
+import bcrypt from 'bcrypt';
+import { env } from '@core/env';
+
+export async function invitePatient(
+    repo: UserRepo,
+    email: string,
+    channel: 'email'|'sms'|'qr' = 'email'
+) {
+    const existing = await repo.findByEmail(email);
+    if (existing) {
+        throw new Error('Email already registered');
+    }
+    const tempHash = await bcrypt.hash(randomHex(12), 10);
+    const u = await repo.create({ email, passwordHash: tempHash, role: 'patient', status: 'invited' });
+    const token = randomHex(32);
+    const expiresAt = hoursFromNow(env.INVITE_TTL_HOURS);
+    await InviteModel.create({ userId: u.id, token, expiresAt, channel });
+    return { userId: u.id, token, expiresAt };
+}
+
+function randomHex(len: number) {
+    const { randomBytes } = require('crypto');
+    return randomBytes(len).toString('hex');
+}
+function hoursFromNow(h: number) {
+    const d = new Date();
+    d.setHours(d.getHours() + h);
+    return d;
+}
+
+================================================================================
+FILE: backend/src/features/auth/application/LoginUser.ts  (size: 1683 bytes)
+================================================================================
+import bcrypt from 'bcrypt';
+import { UserRepo } from '../domain/repositories/UserRepo';
+import { signAccess, signRefresh } from '@core/jwt';
+import { SessionModel } from '../infrastructure/mongo/SessionModel';
+import { env } from '@core/env';
+
+export async function loginUser(
+    repo: UserRepo,
+    email: string,
+    password: string,
+    meta: { ip?: string; ua?: string } = {}
+) {
+    const user = await repo.findByEmail(email);
+    if (!user) throw new Error('Invalid credentials');
+    if (user.status !== 'active') throw new Error('Account not active');
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) throw new Error('Invalid credentials');
+
+    const sid = cryptoRandom();
+    const refreshExpires = daysFromNow(env.REFRESH_TTL_DAYS);
+    const refreshToken = signRefresh({ sid, sub: user.id }, refreshExpires);
+    await SessionModel.create({
+        sid,
+        userId: user.id,
+        refreshTokenHash: hash(refreshToken),
+        userAgent: meta.ua || '',
+        ip: meta.ip || '',
+        createdAt: new Date(),
+        expiresAt: refreshExpires,
+    });
+    const accessToken = signAccess({ sub: user.id, role: user.role, sid });
+    return { accessToken, refreshToken, user: { id: user.id, email: user.email, role: user.role } };
+}
+
+function daysFromNow(days: number) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d;
+}
+
+function cryptoRandom(len: number = 22) {
+    const { randomBytes } = require('crypto');
+    return randomBytes(len).toString('hex').slice(0, len);
+}
+
+function hash(v: string) {
+    const { createHash } = require('crypto');
+    return createHash('sha256').update(v).digest('hex');
+}
+
+================================================================================
+FILE: backend/src/features/auth/application/RegisterDoctor.ts  (size: 474 bytes)
+================================================================================
+import bcrypt from 'bcrypt';
+import { UserRepo } from '../domain/repositories/UserRepo';
+
+export async function registerDoctor(repo: UserRepo, email: string, password: string) {
+    const existing = await repo.findByEmail(email);
+    if (existing) throw new Error('Email already registered');
+    const passwordHash = await bcrypt.hash(password, 10);
+    // Doctors are active immediately
+    return repo.create({ email, passwordHash, role: 'doctor', status: 'active' });
+}
+
+================================================================================
+FILE: backend/src/features/auth/application/RegisterUser.ts  (size: 506 bytes)
+================================================================================
+import bcrypt from 'bcrypt';
+import { UserRepo } from '../domain/repositories/UserRepo';
+import { Role } from '@features/auth/domain/entities/User';
+
+export async function registerUser(repo: UserRepo, email: string, password: string, role: Role) {
+    const existing = await repo.findByEmail(email);
+    if (existing) throw new Error('Email already registered');
+    const passwordHash = await bcrypt.hash(password, 10);
+    return repo.create({ email, passwordHash, role, status: 'active' });
+}
+
+================================================================================
+FILE: backend/src/features/auth/domain/entities/User.ts  (size: 277 bytes)
+================================================================================
+export type Role = 'patient' | 'doctor';
+export type UserStatus = 'invited' | 'active' | 'locked';
+
+export interface UserEntity {
+    id: string;
+    email: string;
+    passwordHash: string;
+    role: Role;
+    status: UserStatus;
+    createdAt?: Date;
+    updatedAt?: Date;
+}
+
+================================================================================
+FILE: backend/src/features/auth/domain/repositories/UserRepo.ts  (size: 415 bytes)
+================================================================================
+import {UserEntity} from "@features/auth/domain/entities/User";
+
+export interface UserRepo {
+    findByEmail(email: string): Promise<UserEntity | null>;
+    findById(id: string): Promise<UserEntity | null>;
+    create(data: Omit<UserEntity,'id'>): Promise<UserEntity>;
+    updatePassword(id: string, passwordHash: string): Promise<void>;
+    updateStatus(id: string, status: UserEntity['status']): Promise<void>;
+}
+
+================================================================================
+FILE: backend/src/features/auth/infrastructure/mongo/InviteModel.ts  (size: 507 bytes)
+================================================================================
+import mongoose from 'mongoose';
+
+const schema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    token: { type: String, required: true, unique: true, index: true },
+    expiresAt: { type: Date, required: true, index: true },
+    usedAt: { type: Date, default: null },
+    channel: { type: String, enum: ['email','sms','qr'], default: 'email' },
+}, { timestamps: true });
+
+export const InviteModel = mongoose.model('Invite', schema);
+
+================================================================================
+FILE: backend/src/features/auth/infrastructure/mongo/MongoUserRepo.ts  (size: 1161 bytes)
+================================================================================
+import { UserModel } from './UserModel';
+import {UserEntity} from "@features/auth/domain/entities/User";
+import {UserRepo} from "@features/auth/domain/repositories/UserRepo";
+
+const toEntity = (doc: any): UserEntity => ({
+    id: String(doc._id),
+    email: doc.email,
+    passwordHash: doc.passwordHash,
+    role: doc.role,
+    status: doc.status,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+});
+
+export class MongoUserRepo implements UserRepo {
+    async findByEmail(email: string) {
+        const doc = await UserModel.findOne({ email });
+        return doc ? toEntity(doc) : null;
+    }
+    async findById(id: string) {
+        const doc = await UserModel.findById(id);
+        return doc ? toEntity(doc) : null;
+    }
+    async create(data: Omit<UserEntity,'id'>) {
+        const doc = await UserModel.create(data);
+        return toEntity(doc);
+    }
+    async updatePassword(id: string, passwordHash: string) {
+        await UserModel.updateOne({ _id: id }, { $set: { passwordHash } });
+    }
+    async updateStatus(id: string, status: UserEntity['status']) {
+        await UserModel.updateOne({ _id: id }, { $set: { status } });
+    }
+}
+
+================================================================================
+FILE: backend/src/features/auth/infrastructure/mongo/SessionModel.ts  (size: 606 bytes)
+================================================================================
+import mongoose from 'mongoose';
+
+const schema = new mongoose.Schema({
+        sid: { type: String, required: true, unique: true, index: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    refreshTokenHash: { type: String, required: true },
+    userAgent: { type: String, default: '' },
+    ip: { type: String, default: '' },
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, required: true, index: true },
+    revokedAt: { type: Date, default: null },
+});
+
+export const SessionModel = mongoose.model('Session', schema);
+
+================================================================================
+FILE: backend/src/features/auth/infrastructure/mongo/UserModel.ts  (size: 468 bytes)
+================================================================================
+import mongoose from 'mongoose';
+
+const schema = new mongoose.Schema({
+    email: { type: String, unique: true, required: true, index: true },
+    passwordHash: { type: String, required: true },
+    role: { type: String, enum: ['patient','doctor'], default: 'patient', index: true },
+    status: { type: String, enum: ['invited','active','locked'], default: 'invited', index: true },
+}, { timestamps: true });
+
+export const UserModel = mongoose.model('User', schema);
+
+================================================================================
+FILE: backend/src/features/auth/interfaces/dto/auth.dto.ts  (size: 454 bytes)
+================================================================================
+import { z } from 'zod';
+export const LoginDto = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+});
+
+export const InvitePatientDto = z.object({
+    email: z.string().email(),
+    channel: z.enum(['email','sms','qr']).default('email'),
+});
+
+export const ActivateDto = z.object({
+    token: z.string().min(16),
+    password: z.string().min(6),
+});
+
+export const RefreshDto = z.object({
+    refreshToken: z.string().min(16),
+});
+
+================================================================================
+FILE: backend/src/features/auth/interfaces/http/auth.routes.ts  (size: 6050 bytes)
+================================================================================
+import { Router } from 'express';
+import { MongoUserRepo } from '../../infrastructure/mongo/MongoUserRepo';
+import { LoginDto, InvitePatientDto, ActivateDto, RefreshDto } from '../dto/auth.dto';
+import { loginUser } from '@features/auth/application/LoginUser';
+import { registerDoctor } from '@features/auth/application/RegisterDoctor';
+import { invitePatient } from '@features/auth/application/InvitePatient';
+import { activateUser } from '@features/auth/application/ActivateUser';
+import { authMiddleware, requireRole, signAccess, signRefresh, verifyRefresh } from '@core/jwt';
+import { SessionModel } from '../../infrastructure/mongo/SessionModel';
+import { env } from '@core/env';
+
+export const authRouter = Router();
+const repo = new MongoUserRepo();
+
+// ---- Public ----
+authRouter.post('/login', async (req, res) => {
+    const parsed = LoginDto.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
+    try {
+        const out = await loginUser(repo, parsed.data.email, parsed.data.password, {
+            ip: req.ip, ua: req.get('user-agent') || '',
+        });
+        res.json(out);
+    } catch (e: any) {
+        res.status(401).json({ error: e.message });
+    }
+});
+
+authRouter.post('/refresh', async (req, res) => {
+    const parsed = RefreshDto.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
+    try {
+        const claims = verifyRefresh(parsed.data.refreshToken);
+        const sid = claims.sid;
+        const session = await SessionModel.findOne({
+            sid,
+            refreshTokenHash: hash(parsed.data.refreshToken),
+            revokedAt: null,
+        });
+        if (!session || String(session.userId) !== claims.sub) {
+            return res.status(401).json({ error: 'Invalid session' });
+        }
+        if (session.expiresAt.getTime() < Date.now()) {
+            return res.status(401).json({ error: 'Session expired' });
+        }
+        const user = await repo.findById(claims.sub);
+        if (!user) return res.status(401).json({ error: 'User not found' });
+        if (user.status !== 'active') return res.status(401).json({ error: 'Account not active' });
+
+        const access = signAccess({ sub: user.id, role: user.role, sid });
+        res.json({ accessToken: access });
+    } catch (_e: any) {
+        res.status(401).json({ error: 'Invalid token' });
+    }
+});
+
+// ---- Doctor-only (hospital web) ----
+authRouter.post('/doctors/register', authMiddleware, requireRole('doctor'), async (req, res) => {
+    const { email, password } = req.body || {};
+    if (typeof email !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ error: 'Invalid payload' });
+    }
+    try {
+        const u = await registerDoctor(repo, email, password);
+        res.status(201).json({ id: u.id, email: u.email, role: u.role });
+    } catch (e: any) {
+        res.status(409).json({ error: e.message });
+    }
+});
+
+authRouter.post('/invite/patient', authMiddleware, requireRole('doctor'), async (req, res) => {
+    const parsed = InvitePatientDto.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
+    try {
+        const { userId, token, expiresAt } = await invitePatient(
+            repo,
+            parsed.data.email,
+            parsed.data.channel
+        );
+        // In production: send token via email/SMS. Here, return it so the doctor can copy it.
+        const link = `${req.protocol}://${req.get('host')}/auth/activate?token=${token}`;
+        res.status(201).json({ userId, token, link, expiresAt });
+    } catch (e: any) {
+        res.status(409).json({ error: e.message });
+    }
+});
+
+// ---- Patient activation (mobile) ----
+authRouter.post('/activate', async (req, res) => {
+    const parsed = ActivateDto.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
+    try {
+        const u = await activateUser(parsed.data.token, parsed.data.password);
+        // auto-login after activation
+        const out = await requireLoginAfterActivation(u.id, req);
+        res.json(out);
+    } catch (e: any) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
+async function requireLoginAfterActivation(userId: string, req: any) {
+    const user = await repo.findById(userId);
+    if (!user) throw new Error('User not found');
+    if (user.status !== 'active') throw new Error('Account not active');
+    const sid = randomId();
+    const refreshExpires = daysFromNow(env.REFRESH_TTL_DAYS);
+    const refreshToken = signRefresh({ sid, sub: user.id }, refreshExpires);
+    await SessionModel.create({
+        sid,
+        userId: user.id,
+        refreshTokenHash: hash(refreshToken),
+        userAgent: req.get('user-agent') || '',
+        ip: req.ip || '',
+        createdAt: new Date(),
+        expiresAt: refreshExpires,
+    });
+    const accessToken = signAccess({ sub: user.id, role: user.role, sid });
+    return { accessToken, refreshToken, user: { id: user.id, email: user.email, role: user.role } };
+}
+
+// ---- Me / Logout ----
+authRouter.get('/me', authMiddleware, async (req, res) => {
+    const u = await repo.findById((req as any).user.sub);
+    if (!u) return res.status(404).json({ error: 'Not found' });
+    res.json({ id: u.id, email: u.email, role: u.role, status: u.status });
+});
+
+authRouter.post('/logout', authMiddleware, async (req, res) => {
+    const { sid, sub } = (req as any).user;
+    await SessionModel.updateOne({ sid, userId: sub, revokedAt: null }, { $set: { revokedAt: new Date() } });
+    res.json({ ok: true });
+});
+
+// Helpers
+function hash(v: string) {
+    const { createHash } = require('crypto');
+    return createHash('sha256').update(v).digest('hex');
+}
+function daysFromNow(days: number) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d;
+}
+function randomId(len: number = 22) {
+    const { randomBytes } = require('crypto');
+    return randomBytes(len).toString('hex').slice(0, len);
+}
+
+================================================================================
+FILE: backend/src/features/scoring/application/EnqueueScore.ts  (size: 280 bytes)
+================================================================================
+import {ScoreJobData, scoreQueue} from "@features/scoring/infrastructure/queue/scoreQueue";
+
+export async function enqueueScore(data: ScoreJobData) {
+    const job = await scoreQueue.add('score-now', data, { removeOnComplete: 100, removeOnFail: 100 });
+    return job.id;
+}
+
+================================================================================
+FILE: backend/src/features/scoring/application/GetJobStatus.ts  (size: 371 bytes)
+================================================================================
+import {scoreQueue} from "@features/scoring/infrastructure/queue/scoreQueue";
+
+export async function getJobStatus(id: string) {
+    const job = await scoreQueue.getJob(id);
+    if (!job) return null;
+    const state = await job.getState();
+    return { id: job.id, state, returnvalue: job.returnvalue ?? null, failedReason: (job as any).failedReason ?? null };
+}
+
+================================================================================
+FILE: backend/src/features/scoring/infrastructure/queue/scoreQueue.ts  (size: 356 bytes)
+================================================================================
+import { Queue } from 'bullmq';
+import Redis from 'ioredis';
+import { env } from '@core/env';
+
+export type ScoreJobData = { patient_id: string };
+
+export const redis = new Redis(env.REDIS_URL, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+});
+
+export const scoreQueue = new Queue<ScoreJobData>('score', { connection: redis });
+
+================================================================================
+FILE: backend/src/features/scoring/interfaces/http/score.routes.ts  (size: 730 bytes)
+================================================================================
+import { Router } from 'express';
+import { authMiddleware } from '@core/jwt';
+import { enqueueScore } from '@features/scoring/application/EnqueueScore';
+import { getJobStatus } from '@features/scoring/application/GetJobStatus';
+
+export const scoreRouter = Router();
+
+scoreRouter.use(authMiddleware);
+
+scoreRouter.post('/jobs/score-now', async (req, res) => {
+    const patient_id = req.body?.patient_id || 'demo';
+    const id = await enqueueScore({ patient_id });
+    res.status(202).json({ jobId: id });
+});
+
+scoreRouter.get('/jobs/:id', async (req, res) => {
+    const info = await getJobStatus(req.params.id);
+    if (!info) return res.status(404).json({ error: 'job not found' });
+    res.json(info);
+});
+
+================================================================================
+FILE: backend/src/index.ts  (size: 728 bytes)
+================================================================================
+// src/index.ts
+import mongoose from 'mongoose';
+import { env } from '@core/env';
+import { createApp } from './server';
+
+async function main() {
+    const app = createApp();
+
+    try {
+        await mongoose.connect(env.MONGO_URI);
+        console.log('[backend] Mongo connected');
+    } catch (err) {
+        console.error('[backend] Mongo connect error', err);
+        process.exit(1);
+    }
+
+    const port = Number(env.PORT) || 4000;
+    const host = env.HOST || '0.0.0.0';
+
+    app.listen(port, host, () => {
+        // show localhost in the log for convenience
+        const shownHost = host === '0.0.0.0' ? 'localhost' : host;
+        console.log(`[backend] listening on http://${shownHost}:${port}`);
+    });
+}
+
+main();
+
+================================================================================
+FILE: backend/src/server.ts  (size: 816 bytes)
+================================================================================
+import 'dotenv/config';
+import express from 'express';
+import helmet from 'helmet';
+import compression from 'compression';
+import cors from 'cors';
+import { env } from '@core/env';
+import { notFound, errorHandler } from '@core/errors';
+import { authRouter } from '@features/auth/interfaces/http/auth.routes';
+import { scoreRouter } from '@features/scoring/interfaces/http/score.routes';
+
+export function createApp() {
+    const app = express();
+    app.use(helmet());
+    app.use(cors({ origin: env.CORS_ORIGIN }));
+    app.use(compression());
+    app.use(express.json());
+
+    app.get('/health', (_req, res) => res.json({ ok: true, service: 'backend' }));
+
+    app.use('/auth', authRouter);
+    app.use('/', scoreRouter);
+    app.use(notFound);
+    app.use(errorHandler);
+    return app;
+}
+
+================================================================================
+FILE: backend/tsconfig.json  (size: 425 bytes)
+================================================================================
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": "src",
+    "paths": {
+      "@core/*": ["core/*"],
+      "@features/*": ["features/*"]
+    }
+  },
+  "include": [
+    "src"
+  ]
+}
+
+================================================================================
+FILE: collect_text_and_tree.py  (size: 9486 bytes)
+================================================================================
+#!/usr/bin/env python3
+"""
+Collect project sources:
+- For text files: write full contents (preserved exactly).
+- For non-text files: write only the file name (marked as UNSUPPORTED/BINARY).
+- Finally, append an ASCII tree of the entire project.
+
+Defaults: excludes heavy build/dependency folders (.next, node_modules) and lockfiles (package-lock.json);
+includes hidden files; deterministic order.
+You can pass --exclude to skip additional directories/files by name, and --followlinks to follow symlinks.
+"""
+
+from __future__ import annotations
+import argparse
+import os
+from pathlib import Path
+import sys
+import tokenize
+import mimetypes
+
+HEADER_LINE = "=" * 80
+
+# Common text-like extensions (still fallback to detection)
+TEXT_EXTS = {
+    # Code
+    ".java", ".kt", ".kts",
+    ".js", ".ts", ".jsx", ".tsx",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm", ".vue", ".svelte",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".m", ".mm",
+    ".go", ".rs", ".php", ".rb", ".swift", ".scala",
+    ".cs", ".sql", ".sh", ".bat", ".ps1",".py",
+    # Config / data / docs
+    ".json", ".yaml", ".yml", ".xml", ".ini", ".cfg", ".conf", ".properties",
+    ".toml", ".gradle", ".md", ".txt", ".env", ".csv", ".tsv",
+    ".gitignore", ".gitattributes", ".editorconfig", ".prettierrc", ".eslintrc",
+}
+
+# MIME types we treat as text even if extension is unknown
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_EXTRAS = {
+    "application/json", "application/xml", "application/javascript",
+    "application/x-sh", "application/x-shellscript",
+}
+
+# Default names to skip while walking/printing the tree (directories or files)
+DEFAULT_EXCLUDES = {".next", "node_modules", ".idea", ".venv", "package-lock.json"}
+
+# ---------- Helpers ----------
+
+def _has_bom(head: bytes) -> str | None:
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if head.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32-le"
+    if head.startswith(b"\x00\x00\xfe\xff"):
+        return "utf-32-be"
+    if head.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if head.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    return None
+
+def _looks_binary(head: bytes) -> bool:
+    if b"\x00" in head:
+        return True
+    # Consider control chars (excluding \t, \n, \r, \f) as "weird"
+    weird = sum(1 for b in head if (b < 32 and b not in (9, 10, 13, 12)))
+    # If > 30% are weird control bytes, likely binary
+    return (len(head) > 0) and (weird / len(head) > 0.30)
+
+def is_text_file(path: Path, sample_bytes: int = 4096) -> bool:
+    # 1) Obvious by extension
+    if path.suffix.lower() in TEXT_EXTS:
+        return True
+    # 2) BOM presence indicates text
+    try:
+        with path.open("rb") as f:
+            head = f.read(sample_bytes)
+    except Exception:
+        return False
+    if _has_bom(head):
+        return True
+    # 3) MIME hint
+    mt, _ = mimetypes.guess_type(path.as_posix())
+    if mt and (mt.startswith(TEXT_MIME_PREFIXES) or mt in TEXT_MIME_EXTRAS):
+        return True
+    # 4) Heuristic on bytes
+    return not _looks_binary(head)
+
+def read_text_preserve(path: Path) -> str:
+    """Read text preserving original characters as closely as possible."""
+    # Respect PEP 263 for Python files
+    if path.suffix.lower() == ".py":
+        with tokenize.open(path) as f:
+            return f.read()
+    # BOM-aware for common Unicode encodings
+    with path.open("rb") as fb:
+        head = fb.read(4)
+    enc = _has_bom(head)
+    if enc:
+        return path.read_text(encoding=enc)
+    # Try UTF-8, then Latin-1 (lossless mapping of bytes 0–255)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+def write_header(out, rel_path: Path, size_bytes: int | None, marker: str | None = None):
+    out.write(f"{HEADER_LINE}\n")
+    out.write(f"FILE: {rel_path.as_posix()}")
+    if size_bytes is not None:
+        out.write(f"  (size: {size_bytes} bytes)")
+    if marker:
+        out.write(f"  [{marker}]")
+    out.write("\n")
+    out.write(f"{HEADER_LINE}\n")
+
+def iter_all_files(root: Path, followlinks: bool, exclude_names: set[str]) -> list[Path]:
+    """
+    Walk the tree and return all file paths, skipping any directory whose *name*
+    is in exclude_names, and skipping any file whose *name* is in exclude_names.
+    """
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=followlinks):
+        # prune directories by name
+        if exclude_names:
+            dirnames[:] = [d for d in dirnames if d not in exclude_names]
+        # skip files by name (e.g., 'package-lock.json')
+        for fn in filenames:
+            if fn in exclude_names:
+                continue
+            files.append(Path(dirpath) / fn)
+    files.sort(key=lambda p: p.as_posix().lower())
+    return files
+
+def tree_lines(root: Path, exclude_names: set[str], followlinks: bool) -> list[str]:
+    """Produce an ASCII tree (dirs then files, sorted), excluding entries by name."""
+    lines: list[str] = [f"{root.name}/"]
+    def walk(d: Path, prefix: str):
+        try:
+            entries = sorted(
+                [e for e in d.iterdir() if e.name not in exclude_names],
+                key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except PermissionError:
+            return
+        for i, e in enumerate(entries):
+            last = (i == len(entries) - 1)
+            conn = "└── " if last else "├── "
+            if e.is_dir():
+                lines.append(f"{prefix}{conn}{e.name}/")
+                walk(e, prefix + ("    " if last else "│   "))
+            else:
+                lines.append(f"{prefix}{conn}{e.name}")
+    walk(root, "")
+    return lines
+
+# ---------- Main logic ----------
+
+def collect(root: Path, out_path: Path, followlinks: bool, exclude_names: set[str]) -> int:
+    root = root.resolve()
+    out_path = out_path.resolve()
+
+    if not root.exists() or not root.is_dir():
+        print(f"Error: root '{root}' is not a directory.", file=sys.stderr)
+        return 2
+
+    files = iter_all_files(root, followlinks, exclude_names)
+    if not files:
+        print("No files found.", file=sys.stderr)
+        return 1
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    text_count = 0
+    bin_count = 0
+
+    with out_path.open("w", encoding="utf-8", newline="\n") as out:
+        for f in files:
+            # Don't include the output file itself
+            try:
+                if f.resolve() == out_path:
+                    continue
+            except Exception:
+                pass
+
+            rel = f.relative_to(root)
+            try:
+                size_bytes = f.stat().st_size
+            except Exception:
+                size_bytes = None
+
+            try:
+                if is_text_file(f):
+                    content = read_text_preserve(f)
+                    write_header(out, rel, size_bytes)
+                    out.write(content)
+                    if not content.endswith("\n"):
+                        out.write("\n")
+                    out.write("\n")
+                    text_count += 1
+                else:
+                    write_header(out, rel, size_bytes, marker="UNSUPPORTED/NON-TEXT")
+                    out.write("(contents omitted)\n\n")
+                    bin_count += 1
+            except Exception as e:
+                write_header(out, rel, size_bytes, marker="READ_ERROR")
+                out.write(f"[ERROR] {e}\n\n")
+                bin_count += 1
+
+        # ---- Append project tree ----
+        out.write(f"{HEADER_LINE}\nPROJECT TREE\n{HEADER_LINE}\n")
+        for line in tree_lines(root, exclude_names, followlinks):
+            out.write(line + "\n")
+
+        # ---- Summary ----
+        out.write("\n")
+        out.write(f"{HEADER_LINE}\nSUMMARY\n{HEADER_LINE}\n")
+        out.write(f"Text files written : {text_count}\n")
+        out.write(f"Non-text/omitted   : {bin_count}\n")
+        out.write(f"Total files seen   : {len(files)}\n")
+
+    print(f"Done. Text={text_count}  Non-text={bin_count}  Wrote -> '{out_path}'.")
+    return 0
+
+def parse_excludes(argv_excludes: list[str]) -> set[str]:
+    """
+    Accept bare names (directories or files) to exclude while walking and when printing the tree.
+    Always include defaults (.next, node_modules, .idea, .venv, package-lock.json), while allowing users to add more.
+    """
+    return DEFAULT_EXCLUDES.union(set(argv_excludes or []))
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Write all text files, list non-text files, then append project tree."
+    )
+    ap.add_argument("root", type=Path, help="Root directory to scan")
+    ap.add_argument("output", type=Path, help="Output .txt file")
+    ap.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="Extra directory/file names to exclude in addition to defaults (space-separated)"
+    )
+    ap.add_argument("--followlinks", action="store_true", help="Follow symlinked directories")
+    args = ap.parse_args()
+
+    exclude_names = parse_excludes(args.exclude)
+    rc = collect(args.root, args.output, followlinks=args.followlinks, exclude_names=exclude_names)
+    sys.exit(rc)
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+FILE: jwt.py  (size: 135 bytes)
+================================================================================
+import secrets
+# Generates a 64-character hex string (32 bytes)
+# Suitable for HS256
+secret = secrets.token_hex(32)
+print(secret)
+
+================================================================================
+FILE: ml-service/app/__init__.py  (size: 0 bytes)
+================================================================================
+
+
+================================================================================
+FILE: ml-service/app/__pycache__/__init__.cpython-311.pyc  (size: 189 bytes)  [UNSUPPORTED/NON-TEXT]
+================================================================================
+(contents omitted)
+
+================================================================================
+FILE: ml-service/app/__pycache__/main.cpython-311.pyc  (size: 761 bytes)  [UNSUPPORTED/NON-TEXT]
+================================================================================
+(contents omitted)
+
+================================================================================
+FILE: ml-service/app/core/__init__.py  (size: 0 bytes)
+================================================================================
+
+
+================================================================================
+FILE: ml-service/app/features/score/__init__.py  (size: 28 bytes)
+================================================================================
+from .router import router
+
+================================================================================
+FILE: ml-service/app/features/score/__pycache__/__init__.cpython-311.pyc  (size: 245 bytes)  [UNSUPPORTED/NON-TEXT]
+================================================================================
+(contents omitted)
+
+================================================================================
+FILE: ml-service/app/features/score/__pycache__/router.cpython-311.pyc  (size: 779 bytes)  [UNSUPPORTED/NON-TEXT]
+================================================================================
+(contents omitted)
+
+================================================================================
+FILE: ml-service/app/features/score/__pycache__/schemas.cpython-311.pyc  (size: 1034 bytes)  [UNSUPPORTED/NON-TEXT]
+================================================================================
+(contents omitted)
+
+================================================================================
+FILE: ml-service/app/features/score/__pycache__/service.cpython-311.pyc  (size: 597 bytes)  [UNSUPPORTED/NON-TEXT]
+================================================================================
+(contents omitted)
+
+================================================================================
+FILE: ml-service/app/features/score/router.py  (size: 278 bytes)
+================================================================================
+from fastapi import APIRouter
+from .schemas import ScoreRequest, ScoreResponse
+from .service import compute_score
+
+router = APIRouter()
+
+@router.post("/score", response_model=ScoreResponse)
+def score(payload: ScoreRequest):
+    return compute_score(payload.patient_id)
+
+================================================================================
+FILE: ml-service/app/features/score/schemas.py  (size: 255 bytes)
+================================================================================
+from pydantic import BaseModel
+from typing import Optional, List
+
+class ScoreRequest(BaseModel):
+    patient_id: Optional[str] = None
+
+class ScoreResponse(BaseModel):
+    band: str
+    score: float
+    reasons: List[str]
+    model_version: str
+
+================================================================================
+FILE: ml-service/app/features/score/service.py  (size: 292 bytes)
+================================================================================
+from .schemas import ScoreResponse
+
+# Replace this with your real model logic later.
+def compute_score(patient_id: str | None) -> ScoreResponse:
+    return ScoreResponse(
+        band="yellow",
+        score=0.42,
+        reasons=["demo-stub"],
+        model_version="0.0.1",
+    )
+
+================================================================================
+FILE: ml-service/app/main.py  (size: 286 bytes)
+================================================================================
+from fastapi import FastAPI
+from app.features.score import router as score_router
+
+app = FastAPI(title="ML Service", version="0.0.1")
+
+@app.get("/v1/health")
+def health():
+    return {"ok": True, "service": "ml-service"}
+
+# mount features
+app.include_router(score_router, prefix="/v1")
+
+================================================================================
+FILE: ml-service/requirements.txt  (size: 77 bytes)
+================================================================================
+fastapi==0.111.0
+uvicorn==0.30.0
+pydantic==2.8.2
+numpy==1.26.4
+pandas==2.2.2
+
+================================================================================
+FILE: web-doctor/.env.local  (size: 46 bytes)
+================================================================================
+NEXT_PUBLIC_BACKEND_URL=http://localhost:4000
+
+================================================================================
+FILE: web-doctor/.env.local.example  (size: 46 bytes)
+================================================================================
+NEXT_PUBLIC_BACKEND_URL=http://localhost:4000
+
+================================================================================
+FILE: web-doctor/next-env.d.ts  (size: 201 bytes)
+================================================================================
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/basic-features/typescript for more information.
+
+================================================================================
+FILE: web-doctor/next.config.mjs  (size: 50 bytes)
+================================================================================
+const nextConfig = {};
+export default nextConfig;
+
+================================================================================
+FILE: web-doctor/package.json  (size: 564 bytes)
+================================================================================
+{
+  "name": "web-doctor",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^20.11.30",
+    "@types/react": "^18.2.66",
+    "@types/react-dom": "^18.2.22",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.4.5"
+  }
+}
+
+================================================================================
+FILE: web-doctor/postcss.config.js  (size: 85 bytes)
+================================================================================
+module.exports = {
+    plugins: {
+        '@tailwindcss/postcss': {},
+    },
+};
+
+================================================================================
+FILE: web-doctor/src/app/_components/Footer.tsx  (size: 528 bytes)
+================================================================================
+export default function Footer() {
+    return (
+        <footer className="py-10 opacity-70">
+            <div className="container text-sm">
+                <div className="border-t border-white/10 pt-6 flex flex-wrap items-center gap-2">
+                    <span>© {new Date().getFullYear()} Hospital Console</span>
+                    <span className="mx-1">•</span>
+                    <span>Secure patient onboarding & monitoring</span>
+                </div>
+            </div>
+        </footer>
+    );
+}
+
+================================================================================
+FILE: web-doctor/src/app/_components/TopNav.tsx  (size: 1920 bytes)
+================================================================================
+'use client';
+import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
+import { useMemo } from 'react';
+
+export default function TopNav() {
+    const pathname = usePathname();
+    const router = useRouter();
+    const isAuthed = useMemo(() => !!globalThis?.localStorage?.getItem('accessToken'), []);
+
+    const logout = () => {
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
+        router.replace('/login');
+    };
+
+    const NavLink = ({ href, children }: { href: string; children: React.ReactNode }) => {
+        const active = pathname?.startsWith(href);
+        return (
+            <Link
+                href={href}
+                className={`px-3 py-2 rounded-md text-sm ${active ? 'text-white bg-white/10' : 'opacity-80 hover:opacity-100'}`}
+            >
+                {children}
+            </Link>
+        );
+    };
+
+    return (
+        <header className="topnav">
+            <div className="container flex items-center justify-between h-14">
+                <Link href={isAuthed ? '/dashboard' : '/login'} className="flex items-center gap-2">
+                    <span className="brand-dot" />
+                    <span className="font-semibold tracking-tight">Hospital Console</span>
+                </Link>
+                <nav className="flex items-center gap-1">
+                    {isAuthed && (
+                        <>
+                            <NavLink href="/dashboard">Dashboard</NavLink>
+                            <NavLink href="/patients">Patients</NavLink>
+                            <button className="btn-secondary ml-2" onClick={logout}>Logout</button>
+                        </>
+                    )}
+                    {!isAuthed && <NavLink href="/login">Sign in</NavLink>}
+                </nav>
+            </div>
+        </header>
+    );
+}
+
+================================================================================
+FILE: web-doctor/src/app/code.txt  (size: 17879 bytes)
+================================================================================
+================================================================================
+FILE: collect_text_and_tree.py  (size: 9486 bytes)
+================================================================================
+#!/usr/bin/env python3
+"""
+Collect project sources:
+- For text files: write full contents (preserved exactly).
+- For non-text files: write only the file name (marked as UNSUPPORTED/BINARY).
+- Finally, append an ASCII tree of the entire project.
+
+Defaults: excludes heavy build/dependency folders (.next, node_modules) and lockfiles (package-lock.json);
+includes hidden files; deterministic order.
+You can pass --exclude to skip additional directories/files by name, and --followlinks to follow symlinks.
+"""
+
+from __future__ import annotations
+import argparse
+import os
+from pathlib import Path
+import sys
+import tokenize
+import mimetypes
+
+HEADER_LINE = "=" * 80
+
+# Common text-like extensions (still fallback to detection)
+TEXT_EXTS = {
+    # Code
+    ".java", ".kt", ".kts",
+    ".js", ".ts", ".jsx", ".tsx",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm", ".vue", ".svelte",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".m", ".mm",
+    ".go", ".rs", ".php", ".rb", ".swift", ".scala",
+    ".cs", ".sql", ".sh", ".bat", ".ps1",".py",
+    # Config / data / docs
+    ".json", ".yaml", ".yml", ".xml", ".ini", ".cfg", ".conf", ".properties",
+    ".toml", ".gradle", ".md", ".txt", ".env", ".csv", ".tsv",
+    ".gitignore", ".gitattributes", ".editorconfig", ".prettierrc", ".eslintrc",
+}
+
+# MIME types we treat as text even if extension is unknown
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_EXTRAS = {
+    "application/json", "application/xml", "application/javascript",
+    "application/x-sh", "application/x-shellscript",
+}
+
+# Default names to skip while walking/printing the tree (directories or files)
+DEFAULT_EXCLUDES = {".next", "node_modules", ".idea", ".venv", "package-lock.json"}
+
+# ---------- Helpers ----------
+
+def _has_bom(head: bytes) -> str | None:
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if head.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32-le"
+    if head.startswith(b"\x00\x00\xfe\xff"):
+        return "utf-32-be"
+    if head.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if head.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    return None
+
+def _looks_binary(head: bytes) -> bool:
+    if b"\x00" in head:
+        return True
+    # Consider control chars (excluding \t, \n, \r, \f) as "weird"
+    weird = sum(1 for b in head if (b < 32 and b not in (9, 10, 13, 12)))
+    # If > 30% are weird control bytes, likely binary
+    return (len(head) > 0) and (weird / len(head) > 0.30)
+
+def is_text_file(path: Path, sample_bytes: int = 4096) -> bool:
+    # 1) Obvious by extension
+    if path.suffix.lower() in TEXT_EXTS:
+        return True
+    # 2) BOM presence indicates text
+    try:
+        with path.open("rb") as f:
+            head = f.read(sample_bytes)
+    except Exception:
+        return False
+    if _has_bom(head):
+        return True
+    # 3) MIME hint
+    mt, _ = mimetypes.guess_type(path.as_posix())
+    if mt and (mt.startswith(TEXT_MIME_PREFIXES) or mt in TEXT_MIME_EXTRAS):
+        return True
+    # 4) Heuristic on bytes
+    return not _looks_binary(head)
+
+def read_text_preserve(path: Path) -> str:
+    """Read text preserving original characters as closely as possible."""
+    # Respect PEP 263 for Python files
+    if path.suffix.lower() == ".py":
+        with tokenize.open(path) as f:
+            return f.read()
+    # BOM-aware for common Unicode encodings
+    with path.open("rb") as fb:
+        head = fb.read(4)
+    enc = _has_bom(head)
+    if enc:
+        return path.read_text(encoding=enc)
+    # Try UTF-8, then Latin-1 (lossless mapping of bytes 0–255)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+def write_header(out, rel_path: Path, size_bytes: int | None, marker: str | None = None):
+    out.write(f"{HEADER_LINE}\n")
+    out.write(f"FILE: {rel_path.as_posix()}")
+    if size_bytes is not None:
+        out.write(f"  (size: {size_bytes} bytes)")
+    if marker:
+        out.write(f"  [{marker}]")
+    out.write("\n")
+    out.write(f"{HEADER_LINE}\n")
+
+def iter_all_files(root: Path, followlinks: bool, exclude_names: set[str]) -> list[Path]:
+    """
+    Walk the tree and return all file paths, skipping any directory whose *name*
+    is in exclude_names, and skipping any file whose *name* is in exclude_names.
+    """
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=followlinks):
+        # prune directories by name
+        if exclude_names:
+            dirnames[:] = [d for d in dirnames if d not in exclude_names]
+        # skip files by name (e.g., 'package-lock.json')
+        for fn in filenames:
+            if fn in exclude_names:
+                continue
+            files.append(Path(dirpath) / fn)
+    files.sort(key=lambda p: p.as_posix().lower())
+    return files
+
+def tree_lines(root: Path, exclude_names: set[str], followlinks: bool) -> list[str]:
+    """Produce an ASCII tree (dirs then files, sorted), excluding entries by name."""
+    lines: list[str] = [f"{root.name}/"]
+    def walk(d: Path, prefix: str):
+        try:
+            entries = sorted(
+                [e for e in d.iterdir() if e.name not in exclude_names],
+                key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except PermissionError:
+            return
+        for i, e in enumerate(entries):
+            last = (i == len(entries) - 1)
+            conn = "└── " if last else "├── "
+            if e.is_dir():
+                lines.append(f"{prefix}{conn}{e.name}/")
+                walk(e, prefix + ("    " if last else "│   "))
+            else:
+                lines.append(f"{prefix}{conn}{e.name}")
+    walk(root, "")
+    return lines
+
+# ---------- Main logic ----------
+
+def collect(root: Path, out_path: Path, followlinks: bool, exclude_names: set[str]) -> int:
+    root = root.resolve()
+    out_path = out_path.resolve()
+
+    if not root.exists() or not root.is_dir():
+        print(f"Error: root '{root}' is not a directory.", file=sys.stderr)
+        return 2
+
+    files = iter_all_files(root, followlinks, exclude_names)
+    if not files:
+        print("No files found.", file=sys.stderr)
+        return 1
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    text_count = 0
+    bin_count = 0
+
+    with out_path.open("w", encoding="utf-8", newline="\n") as out:
+        for f in files:
+            # Don't include the output file itself
+            try:
+                if f.resolve() == out_path:
+                    continue
+            except Exception:
+                pass
+
+            rel = f.relative_to(root)
+            try:
+                size_bytes = f.stat().st_size
+            except Exception:
+                size_bytes = None
+
+            try:
+                if is_text_file(f):
+                    content = read_text_preserve(f)
+                    write_header(out, rel, size_bytes)
+                    out.write(content)
+                    if not content.endswith("\n"):
+                        out.write("\n")
+                    out.write("\n")
+                    text_count += 1
+                else:
+                    write_header(out, rel, size_bytes, marker="UNSUPPORTED/NON-TEXT")
+                    out.write("(contents omitted)\n\n")
+                    bin_count += 1
+            except Exception as e:
+                write_header(out, rel, size_bytes, marker="READ_ERROR")
+                out.write(f"[ERROR] {e}\n\n")
+                bin_count += 1
+
+        # ---- Append project tree ----
+        out.write(f"{HEADER_LINE}\nPROJECT TREE\n{HEADER_LINE}\n")
+        for line in tree_lines(root, exclude_names, followlinks):
+            out.write(line + "\n")
+
+        # ---- Summary ----
+        out.write("\n")
+        out.write(f"{HEADER_LINE}\nSUMMARY\n{HEADER_LINE}\n")
+        out.write(f"Text files written : {text_count}\n")
+        out.write(f"Non-text/omitted   : {bin_count}\n")
+        out.write(f"Total files seen   : {len(files)}\n")
+
+    print(f"Done. Text={text_count}  Non-text={bin_count}  Wrote -> '{out_path}'.")
+    return 0
+
+def parse_excludes(argv_excludes: list[str]) -> set[str]:
+    """
+    Accept bare names (directories or files) to exclude while walking and when printing the tree.
+    Always include defaults (.next, node_modules, .idea, .venv, package-lock.json), while allowing users to add more.
+    """
+    return DEFAULT_EXCLUDES.union(set(argv_excludes or []))
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Write all text files, list non-text files, then append project tree."
+    )
+    ap.add_argument("root", type=Path, help="Root directory to scan")
+    ap.add_argument("output", type=Path, help="Output .txt file")
+    ap.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="Extra directory/file names to exclude in addition to defaults (space-separated)"
+    )
+    ap.add_argument("--followlinks", action="store_true", help="Follow symlinked directories")
+    args = ap.parse_args()
+
+    exclude_names = parse_excludes(args.exclude)
+    rc = collect(args.root, args.output, followlinks=args.followlinks, exclude_names=exclude_names)
+    sys.exit(rc)
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+FILE: dashboard/page.tsx  (size: 1810 bytes)
+================================================================================
+'use client';
+import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { api } from '@features/auth/api';
+import { useAuthGuard } from '@features/auth/hooks';
+import Link from 'next/link';
+
+type Health = { ok: boolean; service: string };
+
+export default function DashboardPage() {
+    useAuthGuard();
+    const router = useRouter();
+    const [health, setHealth] = useState<Health | null>(null);
+
+    const base = useMemo(() => process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000', []);
+
+    useEffect(() => {
+        const t = localStorage.getItem('accessToken');
+        if (!t) { router.replace('/login'); return; }
+        api.get(`${base}/health`).then(r => setHealth(r.data)).catch(() => setHealth(null));
+    }, [router, base]);
+
+    const logout = () => { 
+        localStorage.removeItem('accessToken'); 
+        localStorage.removeItem('refreshToken'); 
+        router.replace('/login'); 
+    };
+
+    return (
+        <main className="p-6 max-w-3xl mx-auto">
+            <div className="flex items-center justify-between">
+                <h1 className="text-2xl font-semibold">Doctor Dashboard</h1>
+                <button className="text-sm underline" onClick={logout}>Logout</button>
+            </div>
+            <div className="mt-4 bg-white rounded p-4 shadow">
+                <p className="text-sm">Backend health: {health ? <span className="text-green-700">OK ({health.service})</span> : <span className="text-red-700">Unavailable</span>}</p>
+            </div>
+            <div className="mt-4 bg-white rounded p-4 shadow">
+                <h2 className="font-medium mb-2">Patients</h2>
+                <Link className="text-blue-700 underline" href="/patients">Invite a patient</Link>
+            </div>
+        </main>
+    );
+}
+
+================================================================================
+FILE: globals.css  (size: 224 bytes)
+================================================================================
+:root{
+    --bg:#0b1220; --card:#0f172a; --muted:#93a4c4; --text:#e6edff;
+    --ring:rgba(99,102,241,0.35); --primary:#6366f1; --primary-600:#5457ee;
+    --ok:#22c55e; --err:#ef4444; --border:#1f2a44; --warn:#f59e0b;
+}
+
+================================================================================
+FILE: layout.tsx  (size: 255 bytes)
+================================================================================
+export const metadata = {
+  title: 'Next.js',
+  description: 'Generated by Next.js',
+}
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
+
+================================================================================
+FILE: login/page.tsx  (size: 1949 bytes)
+================================================================================
+'use client';
+import { useState } from 'react';
+import { login, setAuth } from '@features/auth/api';
+import { useRouter } from 'next/navigation';
+
+export default function LoginPage() {
+    const [email, setEmail] = useState('doctor@example.com');
+    const [password, setPassword] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
+    const router = useRouter();
+
+    const onLogin = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true); setMsg(null);
+        try {
+            const { data } = await login(email, password);
+            localStorage.setItem('accessToken', data.accessToken);
+            localStorage.setItem('refreshToken', data.refreshToken);
+            setAuth(data.accessToken);
+            router.replace('/dashboard');
+        } catch (e:any) {
+            setMsg(e?.response?.data?.error || 'Login failed');
+        } finally { setLoading(false); }
+    };
+
+    return (
+        <main className="min-h-screen flex items-center justify-center p-6">
+            <form onSubmit={onLogin} className="w-full max-w-md bg-white p-6 rounded-lg shadow">
+                <h1 className="text-xl font-semibold mb-4">Doctor Login</h1>
+                {msg && <div className="bg-red-100 text-red-700 p-2 rounded mb-3">{msg}</div>}
+                <label className="block text-sm mb-1">Email</label>
+                <input className="w-full border rounded px-3 py-2 mb-3" value={email} onChange={e=>setEmail(e.target.value)}/>
+                <label className="block text-sm mb-1">Password</label>
+                <input type="password" className="w-full border rounded px-3 py-2 mb-4" value={password} onChange={e=>setPassword(e.target.value)}/>
+                <button disabled={loading} className="w-full bg-black text-white py-2 rounded">{loading? 'Signing in...' : 'Sign In'}</button>
+            </form>
+        </main>
+    );
+}
+
+================================================================================
+FILE: page.tsx  (size: 333 bytes)
+================================================================================
+'use client';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function Home() {
+    const router = useRouter();
+    useEffect(() => {
+        const t = localStorage.getItem('token');
+        router.replace(t ? '/dashboard' : '/login');
+    }, [router]);
+    return null;
+}
+
+================================================================================
+FILE: patients/page.tsx  (size: 1995 bytes)
+================================================================================
+'use client';
+import { useState } from 'react';
+import { invitePatient } from '@features/auth/api';
+import { useAuthGuard } from '@features/auth/hooks';
+
+export default function PatientsPage() {
+    useAuthGuard();
+    const [email, setEmail] = useState('');
+    const [result, setResult] = useState<any | null>(null);
+    const [err, setErr] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+
+    const onInvite = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true); setErr(null); setResult(null);
+        try {
+            const { data } = await invitePatient(email);
+            setResult(data);
+        } catch (e:any) { setErr(e?.response?.data?.error || 'Invite failed'); }
+        finally { setLoading(false); }
+    };
+
+    return (
+        <main className="p-6 max-w-2xl mx-auto">
+            <h1 className="text-2xl font-semibold mb-4">Invite Patient</h1>
+            <form onSubmit={onInvite} className="bg-white rounded p-4 shadow">
+                <label className="block text-sm mb-1">Patient Email</label>
+                <input className="w-full border rounded px-3 py-2 mb-3" value={email} onChange={e=>setEmail(e.target.value)}/>
+                <button disabled={loading} className="bg-black text-white rounded px-4 py-2">{loading?'Inviting...':'Send Invite'}</button>
+            </form>
+            {err && <div className="mt-4 bg-red-100 text-red-700 p-2 rounded">{err}</div>}
+            {result && (
+                <div className="mt-4 bg-green-50 p-3 rounded border">
+                    <p className="text-sm">Invite created.</p>
+                    <p className="text-sm break-all"><strong>Token:</strong> {result.token}</p>
+                    <p className="text-sm break-all"><strong>Link:</strong> {result.link}</p>
+                    <p className="text-sm"><strong>Expires:</strong> {new Date(result.expiresAt).toLocaleString()}</p>
+                </div>
+            )}
+        </main>
+    );
+}
+
+================================================================================
+PROJECT TREE
+================================================================================
+app/
+├── dashboard/
+│   └── page.tsx
+├── login/
+│   └── page.tsx
+├── patients/
+│   └── page.tsx
+├── code.txt
+├── collect_text_and_tree.py
+├── globals.css
+├── layout.tsx
+└── page.tsx
+
+================================================================================
+SUMMARY
+================================================================================
+Text files written : 7
+Non-text/omitted   : 0
+Total files seen   : 7
+
+================================================================================
+FILE: web-doctor/src/app/collect_text_and_tree.py  (size: 9486 bytes)
+================================================================================
+#!/usr/bin/env python3
+"""
+Collect project sources:
+- For text files: write full contents (preserved exactly).
+- For non-text files: write only the file name (marked as UNSUPPORTED/BINARY).
+- Finally, append an ASCII tree of the entire project.
+
+Defaults: excludes heavy build/dependency folders (.next, node_modules) and lockfiles (package-lock.json);
+includes hidden files; deterministic order.
+You can pass --exclude to skip additional directories/files by name, and --followlinks to follow symlinks.
+"""
+
+from __future__ import annotations
+import argparse
+import os
+from pathlib import Path
+import sys
+import tokenize
+import mimetypes
+
+HEADER_LINE = "=" * 80
+
+# Common text-like extensions (still fallback to detection)
+TEXT_EXTS = {
+    # Code
+    ".java", ".kt", ".kts",
+    ".js", ".ts", ".jsx", ".tsx",
+    ".css", ".scss", ".sass", ".less",
+    ".html", ".htm", ".vue", ".svelte",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".m", ".mm",
+    ".go", ".rs", ".php", ".rb", ".swift", ".scala",
+    ".cs", ".sql", ".sh", ".bat", ".ps1",".py",
+    # Config / data / docs
+    ".json", ".yaml", ".yml", ".xml", ".ini", ".cfg", ".conf", ".properties",
+    ".toml", ".gradle", ".md", ".txt", ".env", ".csv", ".tsv",
+    ".gitignore", ".gitattributes", ".editorconfig", ".prettierrc", ".eslintrc",
+}
+
+# MIME types we treat as text even if extension is unknown
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_EXTRAS = {
+    "application/json", "application/xml", "application/javascript",
+    "application/x-sh", "application/x-shellscript",
+}
+
+# Default names to skip while walking/printing the tree (directories or files)
+DEFAULT_EXCLUDES = {".next", "node_modules", ".idea", ".venv", "package-lock.json"}
+
+# ---------- Helpers ----------
+
+def _has_bom(head: bytes) -> str | None:
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if head.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32-le"
+    if head.startswith(b"\x00\x00\xfe\xff"):
+        return "utf-32-be"
+    if head.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if head.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    return None
+
+def _looks_binary(head: bytes) -> bool:
+    if b"\x00" in head:
+        return True
+    # Consider control chars (excluding \t, \n, \r, \f) as "weird"
+    weird = sum(1 for b in head if (b < 32 and b not in (9, 10, 13, 12)))
+    # If > 30% are weird control bytes, likely binary
+    return (len(head) > 0) and (weird / len(head) > 0.30)
+
+def is_text_file(path: Path, sample_bytes: int = 4096) -> bool:
+    # 1) Obvious by extension
+    if path.suffix.lower() in TEXT_EXTS:
+        return True
+    # 2) BOM presence indicates text
+    try:
+        with path.open("rb") as f:
+            head = f.read(sample_bytes)
+    except Exception:
+        return False
+    if _has_bom(head):
+        return True
+    # 3) MIME hint
+    mt, _ = mimetypes.guess_type(path.as_posix())
+    if mt and (mt.startswith(TEXT_MIME_PREFIXES) or mt in TEXT_MIME_EXTRAS):
+        return True
+    # 4) Heuristic on bytes
+    return not _looks_binary(head)
+
+def read_text_preserve(path: Path) -> str:
+    """Read text preserving original characters as closely as possible."""
+    # Respect PEP 263 for Python files
+    if path.suffix.lower() == ".py":
+        with tokenize.open(path) as f:
+            return f.read()
+    # BOM-aware for common Unicode encodings
+    with path.open("rb") as fb:
+        head = fb.read(4)
+    enc = _has_bom(head)
+    if enc:
+        return path.read_text(encoding=enc)
+    # Try UTF-8, then Latin-1 (lossless mapping of bytes 0–255)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+def write_header(out, rel_path: Path, size_bytes: int | None, marker: str | None = None):
+    out.write(f"{HEADER_LINE}\n")
+    out.write(f"FILE: {rel_path.as_posix()}")
+    if size_bytes is not None:
+        out.write(f"  (size: {size_bytes} bytes)")
+    if marker:
+        out.write(f"  [{marker}]")
+    out.write("\n")
+    out.write(f"{HEADER_LINE}\n")
+
+def iter_all_files(root: Path, followlinks: bool, exclude_names: set[str]) -> list[Path]:
+    """
+    Walk the tree and return all file paths, skipping any directory whose *name*
+    is in exclude_names, and skipping any file whose *name* is in exclude_names.
+    """
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=followlinks):
+        # prune directories by name
+        if exclude_names:
+            dirnames[:] = [d for d in dirnames if d not in exclude_names]
+        # skip files by name (e.g., 'package-lock.json')
+        for fn in filenames:
+            if fn in exclude_names:
+                continue
+            files.append(Path(dirpath) / fn)
+    files.sort(key=lambda p: p.as_posix().lower())
+    return files
+
+def tree_lines(root: Path, exclude_names: set[str], followlinks: bool) -> list[str]:
+    """Produce an ASCII tree (dirs then files, sorted), excluding entries by name."""
+    lines: list[str] = [f"{root.name}/"]
+    def walk(d: Path, prefix: str):
+        try:
+            entries = sorted(
+                [e for e in d.iterdir() if e.name not in exclude_names],
+                key=lambda p: (not p.is_dir(), p.name.lower())
+            )
+        except PermissionError:
+            return
+        for i, e in enumerate(entries):
+            last = (i == len(entries) - 1)
+            conn = "└── " if last else "├── "
+            if e.is_dir():
+                lines.append(f"{prefix}{conn}{e.name}/")
+                walk(e, prefix + ("    " if last else "│   "))
+            else:
+                lines.append(f"{prefix}{conn}{e.name}")
+    walk(root, "")
+    return lines
+
+# ---------- Main logic ----------
+
+def collect(root: Path, out_path: Path, followlinks: bool, exclude_names: set[str]) -> int:
+    root = root.resolve()
+    out_path = out_path.resolve()
+
+    if not root.exists() or not root.is_dir():
+        print(f"Error: root '{root}' is not a directory.", file=sys.stderr)
+        return 2
+
+    files = iter_all_files(root, followlinks, exclude_names)
+    if not files:
+        print("No files found.", file=sys.stderr)
+        return 1
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    text_count = 0
+    bin_count = 0
+
+    with out_path.open("w", encoding="utf-8", newline="\n") as out:
+        for f in files:
+            # Don't include the output file itself
+            try:
+                if f.resolve() == out_path:
+                    continue
+            except Exception:
+                pass
+
+            rel = f.relative_to(root)
+            try:
+                size_bytes = f.stat().st_size
+            except Exception:
+                size_bytes = None
+
+            try:
+                if is_text_file(f):
+                    content = read_text_preserve(f)
+                    write_header(out, rel, size_bytes)
+                    out.write(content)
+                    if not content.endswith("\n"):
+                        out.write("\n")
+                    out.write("\n")
+                    text_count += 1
+                else:
+                    write_header(out, rel, size_bytes, marker="UNSUPPORTED/NON-TEXT")
+                    out.write("(contents omitted)\n\n")
+                    bin_count += 1
+            except Exception as e:
+                write_header(out, rel, size_bytes, marker="READ_ERROR")
+                out.write(f"[ERROR] {e}\n\n")
+                bin_count += 1
+
+        # ---- Append project tree ----
+        out.write(f"{HEADER_LINE}\nPROJECT TREE\n{HEADER_LINE}\n")
+        for line in tree_lines(root, exclude_names, followlinks):
+            out.write(line + "\n")
+
+        # ---- Summary ----
+        out.write("\n")
+        out.write(f"{HEADER_LINE}\nSUMMARY\n{HEADER_LINE}\n")
+        out.write(f"Text files written : {text_count}\n")
+        out.write(f"Non-text/omitted   : {bin_count}\n")
+        out.write(f"Total files seen   : {len(files)}\n")
+
+    print(f"Done. Text={text_count}  Non-text={bin_count}  Wrote -> '{out_path}'.")
+    return 0
+
+def parse_excludes(argv_excludes: list[str]) -> set[str]:
+    """
+    Accept bare names (directories or files) to exclude while walking and when printing the tree.
+    Always include defaults (.next, node_modules, .idea, .venv, package-lock.json), while allowing users to add more.
+    """
+    return DEFAULT_EXCLUDES.union(set(argv_excludes or []))
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Write all text files, list non-text files, then append project tree."
+    )
+    ap.add_argument("root", type=Path, help="Root directory to scan")
+    ap.add_argument("output", type=Path, help="Output .txt file")
+    ap.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="Extra directory/file names to exclude in addition to defaults (space-separated)"
+    )
+    ap.add_argument("--followlinks", action="store_true", help="Follow symlinked directories")
+    args = ap.parse_args()
+
+    exclude_names = parse_excludes(args.exclude)
+    rc = collect(args.root, args.output, followlinks=args.followlinks, exclude_names=exclude_names)
+    sys.exit(rc)
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+FILE: web-doctor/src/app/dashboard/page.tsx  (size: 3209 bytes)
+================================================================================
+'use client';
+import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { api } from '@features/auth/api';
+import Link from 'next/link';
+
+type Health = { ok: boolean; service: string };
+
+export default function DashboardPage() {
+    const router = useRouter();
+    const [health, setHealth] = useState<Health | null>(null);
+    const base = useMemo(() => process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000', []);
+
+    useEffect(() => {
+        const t = localStorage.getItem('accessToken');
+        if (!t) { router.replace('/login'); return; }
+        api.get(`${base}/health`).then(r => setHealth(r.data)).catch(() => setHealth(null));
+    }, [router, base]);
+
+    return (
+        <>
+            <div className="mb-6">
+                <h1 className="text-3xl font-semibold">Doctor Dashboard</h1>
+                <p className="text-sm opacity-70">Manage patients and keep an eye on system status.</p>
+            </div>
+
+            <section className="grid gap-5 md:grid-cols-3">
+                <div className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-5">
+                    <div className="text-sm opacity-70 mb-1">Backend health</div>
+                    <div className="text-lg">
+                        {health ? <span className="text-emerald-400">OK</span> : <span className="text-red-400">Unavailable</span>}
+                    </div>
+                    {health && <div className="text-xs opacity-60 mt-1">{health.service}</div>}
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-5">
+                    <div className="text-sm opacity-70 mb-2">Quick action</div>
+                    <Link href="/patients" className="inline-flex items-center justify-center w-full px-4 py-3 rounded-xl font-semibold bg-brand shadow-[0_8px_20px_rgba(99,102,241,.35)] hover:shadow-[0_12px_26px_rgba(99,102,241,.48)]">
+                        Invite a patient
+                    </Link>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-5">
+                    <div className="text-sm opacity-70 mb-2">Sessions</div>
+                    <div className="text-xs opacity-60">Access token saved locally.</div>
+                </div>
+            </section>
+
+            <section className="grid gap-5 md:grid-cols-2 mt-6">
+                <div className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-6">
+                    <h2 className="font-semibold mb-2">Recent activity</h2>
+                    <div className="text-sm opacity-70">No recent events.</div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-6">
+                    <h2 className="font-semibold mb-2">System notes</h2>
+                    <ul className="text-sm opacity-80 list-disc pl-5 space-y-1">
+                        <li>Only doctors can invite patients.</li>
+                        <li>Patients activate via token and use the mobile app.</li>
+                    </ul>
+                </div>
+            </section>
+        </>
+    );
+}
+
+================================================================================
+FILE: web-doctor/src/app/globals.css  (size: 521 bytes)
+================================================================================
+@import "tailwindcss";
+
+:root{
+    --bg:#0b1220; --surface:#0f172a; --surface-2:#101b2f; --text:#e6edff; --muted:#9aa6c6;
+}
+html, body { height: 100%; }
+body{
+    background:
+            radial-gradient(1200px 600px at 10% -10%, rgba(99,102,241,0.12), transparent),
+            radial-gradient(800px 400px at 90% 10%, rgba(16,185,129,0.06), transparent),
+            var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+    letter-spacing:.1px;
+}
+
+================================================================================
+FILE: web-doctor/src/app/layout.tsx  (size: 2245 bytes)
+================================================================================
+import './globals.css';
+import { Inter } from 'next/font/google';
+import Link from 'next/link';
+
+export const metadata = {
+    title: 'Hospital Console',
+    description: 'Doctor console for invites and monitoring',
+};
+
+const inter = Inter({ subsets: ['latin'] });
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+    return (
+        <html lang="en">
+        {/* Make the whole page a 3-row grid so the footer sits at the bottom */}
+        <body className={`${inter.className} min-h-screen grid grid-rows-[auto_1fr_auto]`}>
+        {/* Sticky glassy top bar (row 1) */}
+        <header className="sticky top-0 z-50 backdrop-blur bg-[#0b1220]/80 border-b border-white/10">
+            <div className="mx-auto max-w-[1100px] px-4 h-14 flex items-center justify-between">
+                <Link href="/dashboard" className="flex items-center gap-2">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-brand shadow-[0_0_0_6px_rgba(99,102,241,.18)]" />
+                    <span className="font-semibold tracking-tight">Hospital Console</span>
+                </Link>
+                <nav className="flex items-center gap-1">
+                    <Link href="/dashboard" className="px-3 py-2 rounded-md text-sm opacity-80 hover:opacity-100">Dashboard</Link>
+                    <Link href="/patients" className="px-3 py-2 rounded-md text-sm opacity-80 hover:opacity-100">Patients</Link>
+                </nav>
+            </div>
+        </header>
+
+        {/* Main grows to fill available space (row 2) */}
+        <main className="mx-auto max-w-[1100px] px-4 py-10 w-full">
+            {children}
+        </main>
+
+        {/* Footer always at the very bottom (row 3) */}
+        <footer className="py-10 opacity-70 border-t border-white/10">
+            <div className="mx-auto max-w-[1100px] px-4 text-sm">
+                <div className="pt-6 flex flex-wrap items-center gap-2">
+                    <span>© {new Date().getFullYear()} Hospital Console</span>
+                    <span className="mx-1">•</span>
+                    <span>Secure patient onboarding & monitoring</span>
+                </div>
+            </div>
+        </footer>
+        </body>
+        </html>
+    );
+}
+
+================================================================================
+FILE: web-doctor/src/app/login/page.tsx  (size: 3971 bytes)
+================================================================================
+'use client';
+import { useState } from 'react';
+import { login, setAuth } from '@features/auth/api';
+import { useRouter } from 'next/navigation';
+
+export default function LoginPage() {
+    const [email, setEmail] = useState('doctor@example.com');
+    const [password, setPassword] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
+    const router = useRouter();
+
+    const onLogin = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true); setMsg(null);
+        try {
+            const { data } = await login(email, password);
+            localStorage.setItem('accessToken', data.accessToken);
+            localStorage.setItem('refreshToken', data.refreshToken);
+            setAuth(data.accessToken);
+            router.replace('/dashboard');
+        } catch (e: any) {
+            setMsg(e?.response?.data?.error || 'Login failed');
+        } finally { setLoading(false); }
+    };
+
+    return (
+        <div className="grid gap-10 lg:grid-cols-12">
+            {/* Left hero */}
+            <section className="hidden lg:block lg:col-span-7">
+                <h1 className="text-4xl font-semibold mb-3">Welcome to Hospital Console</h1>
+                <p className="opacity-80 mb-6 max-w-xl">
+                    Secure access for doctors to onboard patients and review clinical signals.
+                </p>
+                <div className="flex gap-2 text-sm">
+                    <span className="px-3 py-2 rounded-md border border-white/10 bg-white/5">RBAC</span>
+                    <span className="px-3 py-2 rounded-md border border-white/10 bg-white/5">Invites</span>
+                    <span className="px-3 py-2 rounded-md border border-white/10 bg-white/5">Jobs</span>
+                </div>
+            </section>
+
+            {/* Right auth card */}
+            <section className="lg:col-span-5">
+                <form onSubmit={onLogin} className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-6 max-w-md ml-auto">
+                    <h2 className="text-xl font-semibold mb-2">Sign in</h2>
+                    <p className="text-sm opacity-70 mb-4">Use your hospital email and password.</p>
+
+                    {msg && (
+                        <div className="p-3 rounded-md border border-red-400/40 bg-red-500/10 text-red-300 text-sm mb-3">
+                            {msg}
+                        </div>
+                    )}
+
+                    <label className="block text-sm mb-1">Email</label>
+                    <input
+                        className="w-full px-3 py-3 rounded-xl border border-white/10 bg-white/5 outline-none focus:ring-4 focus:ring-brand/30 focus:border-brand-600 mb-3"
+                        autoFocus
+                        value={email}
+                        onChange={e=>setEmail(e.target.value)}
+                        placeholder="you@hospital.org"
+                    />
+
+                    <label className="block text-sm mb-1">Password</label>
+                    <input
+                        type="password"
+                        className="w-full px-3 py-3 rounded-xl border border-white/10 bg-white/5 outline-none focus:ring-4 focus:ring-brand/30 focus:border-brand-600 mb-5"
+                        value={password}
+                        onChange={e=>setPassword(e.target.value)}
+                        placeholder="••••••••"
+                    />
+
+                    <button
+                        disabled={loading}
+                        className="w-full inline-flex items-center justify-center px-4 py-3 rounded-xl font-semibold bg-brand shadow-[0_8px_20px_rgba(99,102,241,.35)] hover:shadow-[0_12px_26px_rgba(99,102,241,.48)] transition will-change-transform"
+                    >
+                        {loading? 'Signing in…' : 'Sign in'}
+                    </button>
+                </form>
+            </section>
+        </div>
+    );
+}
+
+================================================================================
+FILE: web-doctor/src/app/page.tsx  (size: 339 bytes)
+================================================================================
+'use client';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function Home() {
+    const router = useRouter();
+    useEffect(() => {
+        const t = localStorage.getItem('accessToken');
+        router.replace(t ? '/dashboard' : '/login');
+    }, [router]);
+    return null;
+}
+
+================================================================================
+FILE: web-doctor/src/app/patients/page.tsx  (size: 3532 bytes)
+================================================================================
+'use client';
+import { useState } from 'react';
+import { invitePatient } from '@features/auth/api';
+
+export default function PatientsPage() {
+    const [email, setEmail] = useState('');
+    const [result, setResult] = useState<any | null>(null);
+    const [err, setErr] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+
+    const onInvite = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true); setErr(null); setResult(null);
+        try {
+            const { data } = await invitePatient(email);
+            setResult(data);
+        } catch (e: any) { setErr(e?.response?.data?.error || 'Invite failed'); }
+        finally { setLoading(false); }
+    };
+
+    const copy = async (text: string) => {
+        try { await navigator.clipboard.writeText(text); alert('Copied!'); } catch {}
+    };
+
+    return (
+        <>
+            <div className="mb-6">
+                <h1 className="text-3xl font-semibold">Invite Patient</h1>
+                <p className="text-sm opacity-70">Send an activation link or token to a patient’s email.</p>
+            </div>
+
+            <form onSubmit={onInvite} className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-6 max-w-xl">
+                <label className="block text-sm mb-1">Patient email</label>
+                <input
+                    className="w-full px-3 py-3 rounded-xl border border-white/10 bg-white/5 outline-none focus:ring-4 focus:ring-brand/30 focus:border-brand-600 mb-3"
+                    value={email}
+                    onChange={e=>setEmail(e.target.value)}
+                    placeholder="patient@example.com"
+                />
+                <button disabled={loading} className="inline-flex items-center justify-center px-4 py-3 rounded-xl font-semibold bg-brand shadow-[0_8px_20px_rgba(99,102,241,.35)] hover:shadow-[0_12px_26px_rgba(99,102,241,.48)]">
+                    {loading?'Inviting…':'Send invite'}
+                </button>
+            </form>
+
+            {err && (
+                <div className="mt-4 p-3 rounded-md border border-red-400/40 bg-red-500/10 text-red-300 text-sm max-w-xl">
+                    {err}
+                </div>
+            )}
+
+            {result && (
+                <div className="mt-4 rounded-2xl border border-white/10 bg-[#0f172a] shadow-panel p-6 space-y-2 max-w-2xl">
+                    <p className="text-sm opacity-80">Invite created.</p>
+                    <p className="text-sm break-all"><strong>Token:</strong> {result.token}</p>
+                    <p className="text-sm break-all"><strong>Link:</strong> {result.link}</p>
+                    <p className="text-sm"><strong>Expires:</strong> {new Date(result.expiresAt).toLocaleString()}</p>
+                    <div className="flex gap-2">
+                        <button className="inline-flex items-center justify-center px-4 py-3 rounded-xl font-semibold bg-brand shadow-[0_8px_20px_rgba(99,102,241,.35)] hover:shadow-[0_12px_26px_rgba(99,102,241,.48)]" onClick={()=>copy(result.token)}>
+                            Copy token
+                        </button>
+                        <a className="inline-flex items-center justify-center px-4 py-3 rounded-xl font-semibold bg-brand shadow-[0_8px_20px_rgba(99,102,241,.35)] hover:shadow-[0_12px_26px_rgba(99,102,241,.48)]" href={result.link} target="_blank">
+                            Open link
+                        </a>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+}
+
+================================================================================
+FILE: web-doctor/src/features/auth/api.ts  (size: 767 bytes)
+================================================================================
+import axios from 'axios';
+
+export const api = axios.create({
+    baseURL: process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000',
+});
+
+export function setAuth(token: string | null) {
+    if (token) api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    else delete api.defaults.headers.common['Authorization'];
+}
+
+export async function login(email: string, password: string) {
+    return api.post('/auth/login', { email, password });
+}
+
+export async function refresh(refreshToken: string) {
+    return api.post('/auth/refresh', { refreshToken });
+}
+
+export async function invitePatient(email: string) {
+    return api.post('/auth/invite/patient', { email, channel: 'email' });
+}
+
+export async function me() {
+    return api.get('/auth/me');
+}
+
+================================================================================
+FILE: web-doctor/src/features/auth/hooks.ts  (size: 357 bytes)
+================================================================================
+'use client';
+import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
+import { setAuth } from './api';
+
+export function useAuthGuard() {
+    const router = useRouter();
+    useEffect(() => {
+        const t = localStorage.getItem('accessToken');
+        if (!t) router.replace('/login');
+        else setAuth(t);
+    }, [router]);
+}
+
+================================================================================
+FILE: web-doctor/tailwind.config.js  (size: 659 bytes)
+================================================================================
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+    darkMode: 'class',
+    content: [
+        './src/app/**/*.{ts,tsx}',
+        './src/features/**/*.{ts,tsx}',
+        './src/components/**/*.{ts,tsx}',
+    ],
+    theme: {
+        container: { center: true, padding: '1rem', screens: { '2xl': '1100px' } },
+        extend: {
+            colors: { brand: { DEFAULT: '#6366F1', 600: '#5457EE' }, ok: '#22c55e', err: '#ef4444' },
+            borderRadius: { xl: '12px', '2xl': '16px' },
+            boxShadow: { soft: '0 12px 28px rgba(0,0,0,0.22)', panel: '0 20px 44px rgba(0,0,0,0.28)' },
+        },
+    },
+    plugins: [],
+};
+
+================================================================================
+FILE: web-doctor/tsconfig.json  (size: 779 bytes)
+================================================================================
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@features/*": [
+        "src/features/*"
+      ],
+      "@app/*": [
+        "src/app/*"
+      ]
+    },
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
+
+================================================================================
+FILE: worker/.env  (size: 85 bytes)
+================================================================================
+REDIS_URL=redis://127.0.0.1:6379
+ML_SERVICE_URL=http://localhost:8000
+DEMO_ENQUEUE=1
+
+================================================================================
+FILE: worker/.env.example  (size: 85 bytes)
+================================================================================
+REDIS_URL=redis://localhost:6379
+ML_SERVICE_URL=http://localhost:8001
+DEMO_ENQUEUE=1
+
+================================================================================
+FILE: worker/package.json  (size: 376 bytes)
+================================================================================
+{
+  "name": "worker",
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "bullmq": "^5.58.5",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.7.0",
+    "pino": "^9.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.13",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+
+================================================================================
+FILE: worker/src/core/log.ts  (size: 75 bytes)
+================================================================================
+import pino from 'pino';
+export const logger = pino({ name: 'worker' });
+
+================================================================================
+FILE: worker/src/features/scoring-consumer/application/processScore.ts  (size: 313 bytes)
+================================================================================
+import axios from 'axios';
+
+export async function processScoreJob(data: { patient_id?: string }) {
+    const base = process.env.ML_SERVICE_URL ?? 'http://localhost:8000';
+    const res = await axios.post(`${base}/v1/score`, {
+        patient_id: data.patient_id ?? 'demo',
+    });
+    return res.data;
+}
+
+================================================================================
+FILE: worker/src/features/scoring-consumer/infrastructure/redis.ts  (size: 220 bytes)
+================================================================================
+import Redis from 'ioredis';
+
+const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
+
+export const connection = new Redis(redisUrl, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+});
+
+================================================================================
+FILE: worker/src/index.ts  (size: 2340 bytes)
+================================================================================
+import 'dotenv/config';
+import { Queue, Worker, QueueEvents, JobsOptions } from 'bullmq';
+import { logger } from './core/log';
+import { connection } from './features/scoring-consumer/infrastructure/redis';
+import { processScoreJob } from './features/scoring-consumer/application/processScore';
+
+const queueName = 'score';
+
+const queue  = new Queue(queueName, { connection });
+const events = new QueueEvents(queueName, { connection });
+
+const worker = new Worker(
+    queueName,
+    async (job) => {
+        logger.info({ id: job.id, name: job.name, data: job.data }, 'Processing job');
+        const result = await processScoreJob(job.data as { patient_id?: string });
+        logger.info({ result }, 'ML result');
+        return result;
+    },
+    { connection }
+);
+
+// Event listeners (cast to any to avoid BullMQ typing drift across versions)
+(worker as any).on('completed', (job: any, result: any) => {
+    logger.info({ jobId: job?.id, result }, 'Job completed');
+});
+(worker as any).on('failed', (job: any, err: any) => {
+    logger.error({ jobId: job?.id, err: err?.message }, 'Job failed');
+});
+(events as any).on('completed', (args: any) => {
+    logger.info(args, 'QueueEvents: completed');
+});
+(events as any).on('failed', (args: any) => {
+    logger.error(args, 'QueueEvents: failed');
+});
+
+// Helpful Redis connection logs
+connection.on('connect', () => logger.info('Redis: connecting...'));
+connection.on('ready',   () => logger.info('Redis: ready'));
+connection.on('error',   (err) => logger.error({ err }, 'Redis: error'));
+connection.on('end',     () => logger.warn('Redis: connection ended'));
+
+// Demo enqueue on startup (controlled by env)
+async function enqueueDemo() {
+    if (process.env.DEMO_ENQUEUE !== '1') return;
+    const job = await queue.add(
+        'score-now',
+        { patient_id: 'demo' },
+        { removeOnComplete: 100, removeOnFail: 100 } as JobsOptions
+    );
+    logger.info({ jobId: job.id }, 'Enqueued demo job');
+}
+enqueueDemo().catch((e) => logger.error(e));
+
+// Graceful shutdown
+async function shutdown() {
+    logger.info('Shutting down worker...');
+    try {
+        await Promise.allSettled([worker.close(), events.close(), queue.close()]);
+        await connection.quit();
+    } finally {
+        process.exit(0);
+    }
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+================================================================================
+FILE: worker/tsconfig.json  (size: 231 bytes)
+================================================================================
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}
+
+================================================================================
+PROJECT TREE
+================================================================================
+disease_predict_system/
+├── .git/
+│   ├── branches/
+│   ├── hooks/
+│   │   ├── applypatch-msg.sample
+│   │   ├── commit-msg.sample
+│   │   ├── fsmonitor-watchman.sample
+│   │   ├── post-update.sample
+│   │   ├── pre-applypatch.sample
+│   │   ├── pre-commit.sample
+│   │   ├── pre-merge-commit.sample
+│   │   ├── pre-push.sample
+│   │   ├── pre-rebase.sample
+│   │   ├── pre-receive.sample
+│   │   ├── prepare-commit-msg.sample
+│   │   ├── push-to-checkout.sample
+│   │   ├── sendemail-validate.sample
+│   │   └── update.sample
+│   ├── info/
+│   │   └── exclude
+│   ├── objects/
+│   │   ├── info/
+│   │   └── pack/
+│   ├── refs/
+│   │   ├── heads/
+│   │   └── tags/
+│   ├── config
+│   ├── description
+│   └── HEAD
+├── backend/
+│   ├── scripts/
+│   │   └── seed_first_doctor.js
+│   ├── src/
+│   │   ├── core/
+│   │   │   ├── env.ts
+│   │   │   ├── errors.ts
+│   │   │   └── jwt.ts
+│   │   ├── features/
+│   │   │   ├── auth/
+│   │   │   │   ├── application/
+│   │   │   │   │   ├── ActivateUser.ts
+│   │   │   │   │   ├── InvitePatient.ts
+│   │   │   │   │   ├── LoginUser.ts
+│   │   │   │   │   ├── RegisterDoctor.ts
+│   │   │   │   │   └── RegisterUser.ts
+│   │   │   │   ├── domain/
+│   │   │   │   │   ├── entities/
+│   │   │   │   │   │   └── User.ts
+│   │   │   │   │   └── repositories/
+│   │   │   │   │       └── UserRepo.ts
+│   │   │   │   ├── infrastructure/
+│   │   │   │   │   └── mongo/
+│   │   │   │   │       ├── InviteModel.ts
+│   │   │   │   │       ├── MongoUserRepo.ts
+│   │   │   │   │       ├── SessionModel.ts
+│   │   │   │   │       └── UserModel.ts
+│   │   │   │   └── interfaces/
+│   │   │   │       ├── dto/
+│   │   │   │       │   └── auth.dto.ts
+│   │   │   │       └── http/
+│   │   │   │           └── auth.routes.ts
+│   │   │   ├── patients/
+│   │   │   │   ├── application/
+│   │   │   │   ├── domain/
+│   │   │   │   ├── infrastructure/
+│   │   │   │   └── interfaces/
+│   │   │   └── scoring/
+│   │   │       ├── application/
+│   │   │       │   ├── EnqueueScore.ts
+│   │   │       │   └── GetJobStatus.ts
+│   │   │       ├── infrastructure/
+│   │   │       │   └── queue/
+│   │   │       │       └── scoreQueue.ts
+│   │   │       └── interfaces/
+│   │   │           └── http/
+│   │   │               └── score.routes.ts
+│   │   ├── collect_text_and_tree.py
+│   │   ├── index.ts
+│   │   └── server.ts
+│   ├── .env
+│   ├── .env.example
+│   ├── package.json
+│   └── tsconfig.json
+├── ml-service/
+│   ├── __pycache__/
+│   ├── app/
+│   │   ├── __pycache__/
+│   │   │   ├── __init__.cpython-311.pyc
+│   │   │   └── main.cpython-311.pyc
+│   │   ├── core/
+│   │   │   └── __init__.py
+│   │   ├── features/
+│   │   │   └── score/
+│   │   │       ├── __pycache__/
+│   │   │       │   ├── __init__.cpython-311.pyc
+│   │   │       │   ├── router.cpython-311.pyc
+│   │   │       │   ├── schemas.cpython-311.pyc
+│   │   │       │   └── service.cpython-311.pyc
+│   │   │       ├── __init__.py
+│   │   │       ├── router.py
+│   │   │       ├── schemas.py
+│   │   │       └── service.py
+│   │   ├── __init__.py
+│   │   └── main.py
+│   └── requirements.txt
+├── web-doctor/
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── _components/
+│   │   │   │   ├── Footer.tsx
+│   │   │   │   └── TopNav.tsx
+│   │   │   ├── dashboard/
+│   │   │   │   └── page.tsx
+│   │   │   ├── login/
+│   │   │   │   └── page.tsx
+│   │   │   ├── patients/
+│   │   │   │   └── page.tsx
+│   │   │   ├── code.txt
+│   │   │   ├── collect_text_and_tree.py
+│   │   │   ├── globals.css
+│   │   │   ├── layout.tsx
+│   │   │   └── page.tsx
+│   │   └── features/
+│   │       ├── auth/
+│   │       │   ├── components/
+│   │       │   ├── api.ts
+│   │       │   └── hooks.ts
+│   │       └── scoring/
+│   ├── .env.local
+│   ├── .env.local.example
+│   ├── next-env.d.ts
+│   ├── next.config.mjs
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── tailwind.config.js
+│   └── tsconfig.json
+├── worker/
+│   ├── src/
+│   │   ├── core/
+│   │   │   └── log.ts
+│   │   ├── features/
+│   │   │   └── scoring-consumer/
+│   │   │       ├── application/
+│   │   │       │   └── processScore.ts
+│   │   │       └── infrastructure/
+│   │   │           └── redis.ts
+│   │   └── index.ts
+│   ├── .env
+│   ├── .env.example
+│   ├── package.json
+│   └── tsconfig.json
+├── collect_text_and_tree.py
+├── jwt.py
+└── project
+
+================================================================================
+SUMMARY
+================================================================================
+Text files written : 84
+Non-text/omitted   : 6
+Total files seen   : 90

@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+:root{
+    --bg:#0b1220; --surface:#0f172a; --surface-2:#101b2f; --text:#e6edff; --muted:#9aa6c6;
+}
+html, body { height: 100%; }
+body{
+    background:
+            radial-gradient(1200px 600px at 10% -10%, rgba(99,102,241,0.12), transparent),
+            radial-gradient(800px 400px at 90% 10%, rgba(16,185,129,0.06), transparent),
+            var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+    letter-spacing:.1px;
+}
